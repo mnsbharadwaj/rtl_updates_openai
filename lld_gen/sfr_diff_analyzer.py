@@ -187,22 +187,51 @@ class ChangeRecord:
             "details":     self.details,
         }
 
-
 # ---------------------------------------------------------------------------
 # SFR header parser
 # ---------------------------------------------------------------------------
 
-# Regex patterns
+# ── Regex patterns for #define MASK/SHIFT format ───────────────────────────
 _DEFINE_RE  = re.compile(r"#define\s+(\w+)\s+(0x[0-9A-Fa-f]+U?|0x[0-9A-Fa-f]+|[0-9]+U?)")
 _OFFSET_RE  = re.compile(r"#define\s+(\w+)_OFFSET\s+(0x[0-9A-Fa-f]+U?|[0-9]+)")
-# Field comment: /* FIELDNAME [MSB:LSB] ACCESS — description */
 _FIELD_CMT  = re.compile(
     r"/\*\s*(\w+)\s+\[(\d+):(\d+)\]\s+(\w+)\s*(?:[\u2014\u2013]|-{1,3})\s*(.*?)\s*\*/"
 )
-
 _MASK_RE    = re.compile(r"#define\s+(\w+)_MASK\s+(0x[0-9A-Fa-f]+U?)")
 _SHIFT_RE   = re.compile(r"#define\s+(\w+)_SHIFT\s+(\d+)U?")
 _RESET_CMT  = re.compile(r"reset\s*[=:]\s*(0x[0-9A-Fa-f]+|\d+)", re.I)
+
+# ── Regex patterns for typedef volatile union bitfield format ───────────────
+# typedef volatile union _SFR_PMU_PMU_CON_U
+_UNION_TYPEDEF_RE = re.compile(
+    r"typedef\s+volatile\s+union\s+(\w+)"
+)
+# } SFR_PMU_PMU_CON, *pSFR_PMU_PMU_CON;
+_UNION_END_RE = re.compile(
+    r"^\s*}\s*(\w+)\s*,\s*\*(\w+)\s*;"
+)
+# volatile UINT32 nValue _VALUE_(0x10000000);
+_UNION_RESET_RE = re.compile(
+    r"_VALUE_\s*\(\s*(0x[0-9A-Fa-f]+|\d+)\s*\)"
+)
+# volatile UINT32 FIELD_NAME : 3;  // lsb-msb [ACCESS] description
+_UNION_FIELD_RE = re.compile(
+    r"volatile\s+\w+\s+(\w+)\s*:\s*(\d+)\s*;"
+    r"(?:\s*//\s*(.*))?"
+)
+# Comment tail: 0-0 [RW1S] description   OR   // 2-2 [RW] desc
+_FIELD_COMMENT_RE = re.compile(
+    r"(\d+)\s*[-–]\s*(\d+)\s*"
+    r"\[\s*([A-Za-z0-9]+)\s*\]"
+    r"\s*(.*)"
+)
+# Access alias map  (union files sometimes use RW1S, RW1C etc.)
+_ACCESS_MAP = {
+    "RW":   "RW",  "RO":   "RO",  "WO":   "WO",
+    "W1C":  "W1C", "W1S":  "W1S",
+    "RW1C": "W1C", "RW1S": "W1S",  # Samsung aliases
+    "RW1":  "W1C", "WC":   "W1C",
+}
 
 
 def _parse_int(s: str) -> int:
@@ -211,23 +240,254 @@ def _parse_int(s: str) -> int:
     return int(s, 16) if s.startswith("0x") or s.startswith("0X") else int(s)
 
 
-class SfrParser:
+def _ip_from_filename(path: str | Path) -> str:
     """
-    Parses one sfr.h file into a SfrIR.
+    Auto-detect IP name from SFR filename convention.
 
-    Processing steps:
-    1. Collect all #define tokens → name→value dict
-    2. Find *_OFFSET defines → register names + byte offsets
-    3. Extract field metadata from structured C comments
-    4. Associate MASK/SHIFT defines with correct register + field
+    Examples:
+        sfr_pmu.h   → PMU
+        sfr_uart.h  → UART
+        SFR_DMA.h   → DMA
+        pmu_sfr.h   → PMU
+        my_ip.h     → MY_IP  (best-effort)
+    """
+    stem = Path(path).stem.upper()          # e.g. SFR_PMU or PMU_SFR
+    # Strip leading/trailing SFR_ token
+    for prefix in ("SFR_", "SFR"):
+        if stem.startswith(prefix):
+            stem = stem[len(prefix):]
+            break
+    for suffix in ("_SFR", "SFR"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return stem or "IP"
+
+
+def _detect_sfr_format(text: str) -> str:
+    """
+    Return 'union' if the file uses typedef volatile union bitfields,
+    otherwise return 'define' for the #define MASK/SHIFT format.
+    """
+    if _UNION_TYPEDEF_RE.search(text):
+        return "union"
+    return "define"
+
+
+
+class UnionSfrParser:
+    """
+    Parses Samsung-style typedef volatile union bitfield SFR headers.
+
+    Format example (sfr_pmu.h)::
+
+        typedef volatile union _SFR_PMU_PMU_CON_U
+        {
+            volatile UINT32 nValue _VALUE_(0x10000000);
+            struct
+            {
+                volatile UINT32 PMU_DMA_CON        : 1; // 0-0  [RW1S] Enable DMA
+                volatile UINT32 PMU_DMA_PASS       : 1; // 4-4  [RO]   DMA result
+                volatile UINT32 RSVD               : 30; // reserved
+            } stNative;
+        } SFR_PMU_PMU_CON, *pSFR_PMU_PMU_CON;
+
+    Extraction rules:
+        - IP name    : auto-detected from filename  (sfr_pmu.h → PMU)
+        - Reg name   : typedef end name strip SFR_ + IP prefix
+                       SFR_PMU_PMU_CON → PMU_CON
+        - Reset value: _VALUE_(0xXXXXXXXX)
+        - Reg offset : order of typedef in file × 4  (or extracted if present)
+        - Field name : struct member name
+        - Bit width  : :N  from struct member
+        - Shift/mask : accumulated bit position as fields are walked in order
+        - Access/desc: parsed from trailing // lsb-msb [ACCESS] description comment
     """
 
     def __init__(self, ip: str = ""):
         self.ip = ip.upper()
 
     def parse_file(self, path: str | Path) -> SfrIR:
+        if not self.ip:
+            self.ip = _ip_from_filename(path)
         text = Path(path).read_text(encoding="utf-8", errors="replace")
         return self.parse_text(text, source=str(path))
+
+    def parse_text(self, text: str, source: str = "<string>") -> SfrIR:
+        ir = SfrIR(ip=self.ip, source=source)
+        lines = text.splitlines()
+
+        in_union   = False
+        in_struct  = False
+        brace_depth = 0
+        current_reg: Optional[RegisterIR] = None
+        bit_pos     = 0          # running bit accumulator for shift/mask
+        reset_val   = 0
+        reg_offset  = 0          # auto-incremented per register (×4 bytes)
+
+        i = 0
+        while i < len(lines):
+            ln = lines[i]
+
+            # ── Detect start of a union typedef ────────────────────────────
+            m = _UNION_TYPEDEF_RE.search(ln)
+            if m and not in_union:
+                in_union    = True
+                in_struct   = False
+                brace_depth = 0
+                bit_pos     = 0
+                reset_val   = 0
+                # Placeholder reg — name filled when we hit the closing typedef
+                current_reg = RegisterIR(
+                    name="__PENDING__",
+                    offset=reg_offset,
+                    desc="",
+                    ip=self.ip,
+                )
+                i += 1
+                continue
+
+            if not in_union:
+                i += 1
+                continue
+
+            # ── Track braces ────────────────────────────────────────────────
+            brace_depth += ln.count("{") - ln.count("}")
+
+            # ── Reset value from _VALUE_(...) ──────────────────────────────
+            mv = _UNION_RESET_RE.search(ln)
+            if mv:
+                try:
+                    reset_val = _parse_int(mv.group(1))
+                except ValueError:
+                    pass
+
+            # ── Detect entry into inner struct ─────────────────────────────
+            # Handles both:  struct {   and   struct\n    {
+            stripped = ln.strip()
+            if stripped.startswith("struct"):
+                in_struct = True
+                i += 1
+                continue
+            # Also handle bare '{' when in_struct starts after struct keyword
+            if stripped == "{" and not in_struct and brace_depth == 2:
+                in_struct = True
+                i += 1
+                continue
+
+            # ── Parse bitfield members inside struct ───────────────────────
+            if in_struct and current_reg is not None:
+                mf = _UNION_FIELD_RE.search(ln)
+                if mf:
+                    fname     = mf.group(1)
+                    width     = int(mf.group(2))
+                    comment   = (mf.group(3) or "").strip()
+
+                    # Parse comment: "0-0 [RW1S] Enable DMA transfer"
+                    mc = _FIELD_COMMENT_RE.search(comment)
+                    if mc:
+                        lsb_c  = int(mc.group(1))
+                        msb_c  = int(mc.group(2))
+                        access_raw = mc.group(3).upper()
+                        desc   = mc.group(4).strip()
+                        access = _ACCESS_MAP.get(access_raw, "RW")
+                        # Use comment-derived lsb as authoritative shift
+                        shift  = lsb_c
+                        msb    = msb_c
+                        lsb    = lsb_c
+                    else:
+                        # No structured comment — derive from bit accumulator
+                        shift  = bit_pos
+                        lsb    = bit_pos
+                        msb    = bit_pos + width - 1
+                        access = "RW"
+                        desc   = comment
+
+                    mask = ((1 << width) - 1) << shift
+
+                    # Skip reserved/padding fields
+                    is_rsvd = fname.upper().startswith("RSVD") or \
+                              fname.upper().startswith("RESERVED") or \
+                              fname.upper() == "RSVDB" or \
+                              fname.upper().startswith("RSVD")
+
+                    if not is_rsvd:
+                        f_ir = FieldIR(
+                            name=fname, reg_name=current_reg.name,
+                            mask=mask, shift=shift,
+                            msb=msb, lsb=lsb,
+                            access=access, reset=(reset_val >> shift) & ((1 << width) - 1),
+                            desc=desc, ip=self.ip,
+                        )
+                        current_reg.fields[fname] = f_ir
+
+                    bit_pos += width
+
+            # ── Detect closing typedef line: } SFR_PMU_PMU_CON, *pSFR...;
+            me = _UNION_END_RE.search(ln)
+            if me and in_union:
+                typedef_name = me.group(1)   # e.g. SFR_PMU_PMU_CON
+                reg_name     = self._extract_reg_name(typedef_name)
+                if current_reg is not None and reg_name:
+                    current_reg.name = reg_name
+                    # Fix reg_name in all fields
+                    for f in current_reg.fields.values():
+                        f.reg_name = reg_name
+                    ir.registers[reg_name] = current_reg
+                    reg_offset += 4   # next register at next word
+
+                in_union   = False
+                in_struct  = False
+                current_reg = None
+
+            i += 1
+
+        return ir
+
+    def _extract_reg_name(self, typedef_name: str) -> str:
+        """
+        SFR_PMU_PMU_CON  → PMU_CON   (strip SFR_ then IP prefix)
+        SFR_PMU_SWT_CON  → SWT_CON
+        """
+        name = typedef_name.upper()
+        # Strip SFR_ prefix
+        if name.startswith("SFR_"):
+            name = name[4:]
+        # Strip IP prefix (e.g. PMU_)
+        prefix = self.ip + "_"
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        return name
+
+
+
+class SfrParser:
+    """
+    Unified SFR header parser — auto-detects file format.
+
+    Supports two formats:
+        1. ``#define`` MASK/SHIFT format  (legacy / synthesised headers)
+        2. ``typedef volatile union`` bitfield format  (Samsung sfr_pmu.h style)
+
+    The IP name is **auto-detected from the filename** when not supplied:
+        sfr_pmu.h  → ip = PMU
+        sfr_uart.h → ip = UART
+
+    ``--ip`` is therefore **optional** on the CLI.
+    """
+
+    def __init__(self, ip: str = ""):
+        self.ip = ip.upper()
+
+    def parse_file(self, path: str | Path) -> SfrIR:
+        if not self.ip:
+            self.ip = _ip_from_filename(path)
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        fmt  = _detect_sfr_format(text)
+        if fmt == "union":
+            return UnionSfrParser(ip=self.ip).parse_text(text, source=str(path))
+        return self.parse_text(text, source=str(path))
+
 
     def parse_text(self, text: str, source: str = "<string>") -> SfrIR:
         ir = SfrIR(ip=self.ip, source=source)
@@ -572,17 +832,23 @@ def classify_sfr_diff(
     list of ChangeRecord objects.
 
     Args:
-        old_sfr: Path to previous sfr.h
-        new_sfr: Path to new sfr.h
-        ip:      Peripheral / IP name (e.g. "DMA")
+        old_sfr: Path to previous sfr.h  (e.g. sfr_pmu_old.h)
+        new_sfr: Path to updated sfr.h   (e.g. sfr_pmu_new.h)
+        ip:      IP/peripheral name (e.g. "PMU").  **Optional** — auto-detected
+                 from filename when omitted.  sfr_pmu.h → PMU, sfr_uart.h → UART.
 
     Returns:
         List[ChangeRecord] sorted by register name, then field name.
     """
+    # Auto-detect IP from filename if not provided
+    if not ip:
+        ip = _ip_from_filename(old_sfr)
+
     analyzer = SfrDiffAnalyzer(ip=ip)
     changes  = analyzer.analyze_files(old_sfr, new_sfr)
     changes.sort(key=lambda c: (c.reg_name, c.field_name or ""))
     return changes
+
 
 
 def changes_to_json(changes: List[ChangeRecord], indent: int = 2) -> str:
