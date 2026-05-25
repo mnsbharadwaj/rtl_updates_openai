@@ -245,21 +245,33 @@ def _ip_from_filename(path: str | Path) -> str:
     Auto-detect IP name from SFR filename convention.
 
     Examples:
-        sfr_pmu.h   → PMU
-        sfr_uart.h  → UART
-        SFR_DMA.h   → DMA
-        pmu_sfr.h   → PMU
-        my_ip.h     → MY_IP  (best-effort)
+        sfr_pmu.h      -> PMU
+        sfr_uart.h     -> UART
+        SFR_DMA.h      -> DMA
+        pmu_sfr.h      -> PMU
+        sfr_pmu_old.h  -> PMU   (strips _old / _new version suffixes)
+        sfr_pmu_new.h  -> PMU
+        sfr_pmu_v2.h   -> PMU
     """
-    stem = Path(path).stem.upper()          # e.g. SFR_PMU or PMU_SFR
-    # Strip leading/trailing SFR_ token
-    for prefix in ("SFR_", "SFR"):
+    stem = Path(path).stem.upper()          # e.g. SFR_PMU or SFR_PMU_OLD
+    # Strip leading SFR_ token
+    for prefix in ("SFR_",):
         if stem.startswith(prefix):
             stem = stem[len(prefix):]
             break
-    for suffix in ("_SFR", "SFR"):
+    # Strip trailing SFR token
+    for suffix in ("_SFR",):
         if stem.endswith(suffix):
             stem = stem[: -len(suffix)]
+            break
+    # Strip common version suffixes: _OLD, _NEW, _V1, _V2, _BACKUP, _BAK
+    _VERSION_SUFFIXES = (
+        "_OLD", "_NEW", "_V1", "_V2", "_V3", "_V4",
+        "_BACKUP", "_BAK", "_PREV", "_UPDATED", "_ORIG",
+    )
+    for vs in _VERSION_SUFFIXES:
+        if stem.endswith(vs):
+            stem = stem[: -len(vs)]
             break
     return stem or "IP"
 

@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include "sfr_new.h"
-#include "lld_patched.h"
+#include "lld.h"
 
 static void test_DMA_CTRL_BURST_get(void) {
     volatile uint32_t regs[256] = {0};
