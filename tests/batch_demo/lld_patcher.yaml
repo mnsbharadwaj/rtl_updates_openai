@@ -1,0 +1,13 @@
+# lld_patcher.yaml -- Demo batch config
+#
+# Usage: python -m lld_gen.main_sfr run-config --config tests/batch_demo/lld_patcher.yaml
+
+sfr_old_dir: "./old_sfr"          # OLD SFR headers
+sfr_new_dir: "./new_sfr"          # NEW/UPDATED SFR headers
+lld_dir:     "./lld"              # Original LLD headers (read-only, never modified)
+output_dir:  "./lld_patched"      # Patched LLD files written HERE
+tests_dir:   "./tests_generated"  # Generated unit test .c files written HERE
+
+no_llm:   true    # no LLM for demo
+no_git:   true    # skip git add
+gcc:      null

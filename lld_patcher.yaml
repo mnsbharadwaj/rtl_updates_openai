@@ -1,0 +1,68 @@
+# lld_patcher.yaml — LLD Auto-Patcher Configuration File
+#
+# Usage:
+#   python -m lld_gen.main_sfr run-config --config lld_patcher.yaml
+#
+# Directory layout expected:
+#   sfr_old_dir/    sfr_pmu.h   sfr_uart.h   sfr_dma.h  ...
+#   sfr_new_dir/    sfr_pmu.h   sfr_uart.h   sfr_dma.h  ...
+#   lld_dir/        lld_pmu.h   lld_uart.h   lld_dma.h  ...
+#
+# Matching rules (in priority order):
+#   1. Same basename in old/new dirs  ->  lld_{ip}.h or {ip}_lld.h in lld_dir
+#   2. _old/_new suffix convention:   sfr_pmu_old.h + sfr_pmu_new.h -> lld_pmu.h
+#   3. IP auto-detected from filename: sfr_pmu.h -> IP=PMU
+
+# ---------------------------------------------------------------------------
+# Required: Directory paths
+# ---------------------------------------------------------------------------
+sfr_old_dir: "./old_sfr"         # Directory containing OLD SFR headers
+sfr_new_dir: "./new_sfr"         # Directory containing NEW/UPDATED SFR headers
+lld_dir:     "./lld"             # Directory containing existing LLD headers
+
+# ---------------------------------------------------------------------------
+# Optional: Output directory (defaults to lld_dir = in-place patch)
+# ---------------------------------------------------------------------------
+output_dir:  "./lld_patched"     # Where patched lld.h files are written
+                                 # Set to same as lld_dir for in-place patching
+
+# ---------------------------------------------------------------------------
+# Optional: Test output directory
+# ---------------------------------------------------------------------------
+tests_dir:   "./tests_generated" # Where test_lld_*.c files are written
+
+# ---------------------------------------------------------------------------
+# LLM settings
+# ---------------------------------------------------------------------------
+no_llm:   true                   # true = use template fallback (no LLM needed)
+hf_token: ""                     # HuggingFace token (or set HF_TOKEN env var)
+
+# ---------------------------------------------------------------------------
+# Git settings
+# ---------------------------------------------------------------------------
+no_git:   true                   # true = skip git add / PR staging
+
+# ---------------------------------------------------------------------------
+# Compiler settings
+# ---------------------------------------------------------------------------
+gcc: null                        # Path to gcc (null = search PATH automatically)
+
+# ---------------------------------------------------------------------------
+# Optional: Per-IP overrides (override global settings for specific IPs)
+# ---------------------------------------------------------------------------
+# ip_overrides:
+#   PMU:
+#     no_llm: false
+#     hf_token: "hf_your_token_here"
+#   UART:
+#     no_llm: true
+
+# ---------------------------------------------------------------------------
+# Optional: Explicit IP list (if auto-detection is insufficient)
+# Auto-detection scans sfr_old_dir for sfr_*.h or *_sfr.h files.
+# Use this to restrict which IPs are processed or override IP names.
+# ---------------------------------------------------------------------------
+# ip_list:
+#   - PMU
+#   - UART
+#   - DMA
