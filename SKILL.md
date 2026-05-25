@@ -1,0 +1,245 @@
+# SKILL.md — LLD Coding Conventions
+
+> Read this file before any code generation. All generated LLD functions must follow these conventions exactly. This file is also used by `lld_patcher.py` for template rendering.
+
+---
+
+## 1. Naming Convention
+
+```
+<IP>_<REG>_<FIELD>_<verb>()
+```
+
+- `IP`, `REG`, `FIELD` → **ALL UPPERCASE**
+- `verb` → **lowercase** (`get`, `set`, `clear`, `set1`, `enable`, `disable`, `status`)
+- Examples:
+  - `DMA_CTRL_EN_get()`
+  - `DMA_CTRL_BURST_set()`
+  - `DMA_STATUS_DONE_clear()`
+  - `DMA_STATUS_IRQ_IRQ_enable()`
+
+---
+
+## 2. Return Type Selection (by bit width)
+
+| Field width | C return type |
+|-------------|---------------|
+| 1 – 8 bits  | `uint8_t`     |
+| 9 – 16 bits | `uint16_t`    |
+| 17 – 32 bits| `uint32_t`    |
+| 33 – 64 bits| `uint64_t`    |
+
+Width = MSB − LSB + 1
+
+---
+
+## 3. Base Pointer Convention
+
+- Base is always `volatile uint32_t *base`
+- Register word index: `N = byte_offset / 4`
+- Register access: `base[N]` (NOT `*(base + N)`, NOT `REG_READ32`)
+
+---
+
+## 4. Access Type → Function Set
+
+| Access | Functions generated |
+|--------|---------------------|
+| `RO`   | `_get()` only |
+| `RW`   | `_get()` + `_set()` |
+| `WO`   | `_set()` only (write-only, no read) |
+| `W1C`  | `_get()` + `_clear()` |
+| `W1S`  | `_get()` + `_set1()` |
+
+---
+
+## 5. Function Templates
+
+### 5.1 Getter (RO and RW fields)
+
+```c
+/** @brief <description> */
+static inline uint32_t DMA_CTRL_BURST_get(volatile uint32_t *base)
+{
+    return (uint32_t)((base[0] & 0x000000F0U) >> 4U);
+}
+```
+
+### 5.2 Setter (RW fields — read-modify-write)
+
+```c
+/** @brief <description> */
+static inline void DMA_CTRL_BURST_set(volatile uint32_t *base, uint32_t val)
+{
+    uint32_t r = base[0];
+    r &= ~0x000000F0U;
+    r |= ((uint32_t)val << 4U) & 0x000000F0U;
+    base[0] = r;
+}
+```
+
+### 5.3 WO Setter (write-only — no read phase)
+
+```c
+/** @brief <description> */
+static inline void DMA_CTRL_EN_set(volatile uint32_t *base, uint32_t val)
+{
+    base[0] = ((uint32_t)val << 0U) & 0x00000001U;
+}
+```
+
+### 5.4 W1C Clear (write 1 to clear — write mask directly, no read)
+
+```c
+/** @brief <description> */
+static inline void DMA_STATUS_DONE_clear(volatile uint32_t *base)
+{
+    base[1] = 0x00000004U; /* W1C: write 1 to clear */
+}
+```
+
+### 5.5 W1S Set1 (write 1 to set)
+
+```c
+/** @brief <description> */
+static inline void DMA_CTRL_START_set1(volatile uint32_t *base)
+{
+    base[0] = 0x00000001U; /* W1S: write 1 to set */
+}
+```
+
+---
+
+## 6. IRQ Helper Functions (mandatory for interrupt-capable fields)
+
+A field is interrupt-capable when its name contains `irq` or `IRQ`, or its
+description contains the word `interrupt`.
+
+**All four functions are mandatory**:
+
+```c
+static inline void  DMA_STATUS_DONE_IRQ_enable(volatile uint32_t *base)     { base[6] |=  0x00000001U; }
+static inline void  DMA_STATUS_DONE_IRQ_disable(volatile uint32_t *base)    { base[6] &= ~0x00000001U; }
+static inline uint32_t DMA_STATUS_DONE_IRQ_status(volatile uint32_t *base)  { return (base[6] & 0x00000001U); }
+static inline void  DMA_STATUS_DONE_IRQ_clear(volatile uint32_t *base)      { base[6] = 0x00000001U; }
+```
+
+---
+
+## 7. SRC_SHA Register Block Header
+
+Every register block in `lld.h` begins with this header comment:
+
+```c
+/* ═══════════════════════════════════════════════════════════════
+ * REGISTER: CTRL                     offset=0x0000
+ * DMA Control Register
+ * SRC_SHA: a1b2c3d4e5f6a7b8
+ * ═══════════════════════════════════════════════════════════════ */
+```
+
+- The SHA-16 is computed by `sfr_diff_analyzer.RegisterIR.sha16`
+- Never manually edit the SHA — it is recomputed on each regeneration
+- The patcher uses this as the splice point for surgical updates
+
+---
+
+## 8. LLM Prompt Template
+
+### System Message
+
+```
+You are an expert embedded C firmware engineer. Generate ONLY raw C code:
+- No #include directives
+- No #define directives
+- No markdown fences
+- No prose or explanations
+- Exact function signatures per SKILL.md conventions
+- static inline functions only
+- Use volatile uint32_t *base parameter
+- Use base[word_index] for register access (word_index = byte_offset / 4)
+```
+
+### User Message Format
+
+```
+IP: DMA
+Register: CTRL at byte offset 0x0000
+Register description: DMA Control Register
+Field: EN  bits [0:0]  access=RW
+Field description: Enable DMA transfer. Write 1 to start.
+Bit mask: 0x00000001  shift: 0
+Return type: uint8_t
+Change: COMMENT_CHANGED
+Generate: DMA_CTRL_EN_get, DMA_CTRL_EN_set
+
+Old function text (for reference):
+<existing function code>
+
+Generate the updated C function(s) following SKILL.md conventions exactly.
+```
+
+---
+
+## 9. Unit Test Conventions
+
+Tests are written to `test_lld_generated.c` and use:
+- `volatile uint32_t regs[256] = {0}` as the mock register space
+- `assert()` for all checks
+- No `malloc`, no OS primitives, no external dependencies
+
+### Test function naming:
+```
+static void test_<IP>_<REG>_<FIELD>_<verb>(void)
+```
+
+### Test file structure:
+```c
+/* AUTO-GENERATED by lld_gen — DO NOT EDIT */
+#include <stdint.h>
+#include <assert.h>
+#include "sfr_new.h"
+#include "lld.h"
+
+static void test_DMA_CTRL_EN_get(void) {
+    volatile uint32_t regs[256] = {0};
+    regs[0] = 0x00000001U;
+    uint8_t v = (uint8_t)DMA_CTRL_EN_get(regs);
+    assert(v == 1U);
+}
+
+int main(void) {
+    test_DMA_CTRL_EN_get();
+    return 0;
+}
+```
+
+---
+
+## 10. PR Description Template
+
+| Column | Content |
+|--------|---------|
+| Register | Register name |
+| Field | Field name (or `—` for register-level changes) |
+| Change Type | One of the 12 change type codes |
+| LLM Used | ✅ or `—` |
+| Test Result | ✅ PASS / ❌ FAIL / ⚠️ MANUAL |
+| Review Flag | 🔴 REVIEW or empty |
+
+Manual review checklist format:
+```markdown
+- [ ] **FUNCTION_NAME** — reason for manual review
+```
+
+---
+
+## 11. Compile Check Command
+
+```bash
+gcc -fsyntax-only -std=c11 -include sfr_new.h -include lld.h test_lld_generated.c
+```
+
+- Must exit with code 0 before PR staging
+- On failure: extract function name → LLM fix → patch back → retry (max 3×)
+- Functions still failing after 3 retries → marked `NEEDS_MANUAL_REVIEW`

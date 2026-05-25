@@ -1,0 +1,40 @@
+# ── Large binary files — DO NOT commit to Git ──────────────────────────────
+llm_runtime/*.gguf
+llm_runtime/*.exe
+llm_runtime/*.zip
+llm_runtime/*.dll
+llm_runtime/*.so
+llm_runtime/*.dylib
+
+# ── LLM response cache — regenerated automatically ─────────────────────────
+.sfr_gen_cache/
+
+# ── Python artifacts ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Generated output headers (optional — commit if you want versioning) ─────
+# Uncomment to exclude generated headers from Git:
+# *_sfr.h
+# *_lld.h
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Patcher backup files ──────────────────────────────────────────────────────
+*.h.bak
