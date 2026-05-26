@@ -27,13 +27,13 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Burst length in beats (0=single, 1=4-beat, 2=8-beat). */
-static inline uint8_t DMA_CTRL_BURST_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_burst_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x0000000EU) >> 1U);
 }
 
 /** @brief Burst length in beats (0=single, 1=4-beat, 2=8-beat). */
-static inline void DMA_CTRL_BURST_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_burst_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x0000000EU;
@@ -42,13 +42,13 @@ static inline void DMA_CTRL_BURST_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Enable DMA transfer. Write 1 to start. */
-static inline uint8_t DMA_CTRL_EN_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_en_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000001U) >> 0U);
 }
 
 /** @brief Enable DMA transfer. Write 1 to start. */
-static inline void DMA_CTRL_EN_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_en_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00000001U;
@@ -57,13 +57,13 @@ static inline void DMA_CTRL_EN_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Operation mode: 0=normal, 1=loopback, 2=scatter-gather. */
-static inline uint8_t DMA_CTRL_MODE_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_mode_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000070U) >> 4U);
 }
 
 /** @brief Operation mode: 0=normal, 1=loopback, 2=scatter-gather. */
-static inline void DMA_CTRL_MODE_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_mode_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00000070U;
@@ -72,13 +72,13 @@ static inline void DMA_CTRL_MODE_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Transfer priority: 0=low, 1=normal, 2=high, 3=critical. */
-static inline uint8_t DMA_CTRL_PRIORITY_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_priority_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00030000U) >> 16U);
 }
 
 /** @brief Transfer priority: 0=low, 1=normal, 2=high, 3=critical. */
-static inline void DMA_CTRL_PRIORITY_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_priority_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00030000U;
@@ -87,13 +87,13 @@ static inline void DMA_CTRL_PRIORITY_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Timeout counter value in bus cycles. */
-static inline uint8_t DMA_CTRL_TIMEOUT_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_timeout_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x0000FF00U) >> 8U);
 }
 
 /** @brief Timeout counter value in bus cycles. */
-static inline void DMA_CTRL_TIMEOUT_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_timeout_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x0000FF00U;
@@ -109,37 +109,37 @@ static inline void DMA_CTRL_TIMEOUT_set(volatile uint32_t *base, uint32_t val)
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Transfer complete flag. Write 1 to clear. */
-static inline uint8_t DMA_STATUS_DONE_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_done_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000001U) >> 0U);
 }
 
 /** @brief Transfer complete flag. Write 1 to clear. */
-static inline void DMA_STATUS_DONE_clear(volatile uint32_t *base)
+static inline void lld_dma_status_done_clear(volatile uint32_t *base)
 {
     base[1] = 0x00000001U; /* W1C: write 1 to clear */
 }
 
 /** @brief Error code: 0=none,1=bus_err,2=addr_err,3=timeout. */
-static inline uint8_t DMA_STATUS_ERROR_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_error_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x0000001CU) >> 2U);
 }
 
 /** @brief Current FIFO fill level in entries. */
-static inline uint8_t DMA_STATUS_LEVEL_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_level_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00FF0000U) >> 16U);
 }
 
 /** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
-static inline uint8_t DMA_STATUS_THRESH_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_thresh_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00007F00U) >> 8U);
 }
 
 /** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
-static inline void DMA_STATUS_THRESH_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_status_thresh_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[1];
     r &= ~0x00007F00U;
@@ -147,10 +147,10 @@ static inline void DMA_STATUS_THRESH_set(volatile uint32_t *base, uint32_t val)
     base[1] = r;
 }
 
-static inline void DMA_STATUS_THRESH_IRQ_enable(volatile uint32_t *base)  { base[1] |=  0x00007F00U; }
-static inline void DMA_STATUS_THRESH_IRQ_disable(volatile uint32_t *base) { base[1] &= ~0x00007F00U; }
-static inline uint32_t DMA_STATUS_THRESH_IRQ_status(volatile uint32_t *base) { return (base[1] & 0x00007F00U); }
-static inline void DMA_STATUS_THRESH_IRQ_clear(volatile uint32_t *base)   { base[1] = 0x00007F00U; }
+static inline void lld_dma_status_thresh_irq_enable(volatile uint32_t *base)  { base[1] |=  0x00007F00U; }
+static inline void lld_dma_status_thresh_irq_disable(volatile uint32_t *base) { base[1] &= ~0x00007F00U; }
+static inline uint32_t lld_dma_status_thresh_irq_status(volatile uint32_t *base) { return (base[1] & 0x00007F00U); }
+static inline void lld_dma_status_thresh_irq_clear(volatile uint32_t *base)   { base[1] = 0x00007F00U; }
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -160,13 +160,13 @@ static inline void DMA_STATUS_THRESH_IRQ_clear(volatile uint32_t *base)   { base
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Enable debug mode. Freezes pipeline for inspection. */
-static inline uint8_t DMA_DEBUG_DBG_EN_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_debug_dbg_en_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x00000001U) >> 0U);
 }
 
 /** @brief Enable debug mode. Freezes pipeline for inspection. */
-static inline void DMA_DEBUG_DBG_EN_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_debug_dbg_en_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x00000001U;
@@ -175,13 +175,13 @@ static inline void DMA_DEBUG_DBG_EN_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Debug mux select: 0=fifo, 1=arb, 2=axi, 3=wrap. */
-static inline uint8_t DMA_DEBUG_DBG_SEL_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_debug_dbg_sel_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x0000000EU) >> 1U);
 }
 
 /** @brief Debug mux select: 0=fifo, 1=arb, 2=axi, 3=wrap. */
-static inline void DMA_DEBUG_DBG_SEL_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_debug_dbg_sel_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x0000000EU;
@@ -197,13 +197,13 @@ static inline void DMA_DEBUG_DBG_SEL_set(volatile uint32_t *base, uint32_t val)
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Source start address (must be word-aligned). */
-static inline uint32_t DMA_CHAN_SRC_ADDR_get(volatile uint32_t *base)
+static inline uint32_t lld_dma_chan_src_addr_get(volatile uint32_t *base)
 {
     return (uint32_t)((base[3] & 0xFFFFFFFFU) >> 0U);
 }
 
 /** @brief Source start address (must be word-aligned). */
-static inline void DMA_CHAN_SRC_ADDR_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_chan_src_addr_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[3];
     r &= ~0xFFFFFFFFU;
@@ -219,13 +219,13 @@ static inline void DMA_CHAN_SRC_ADDR_set(volatile uint32_t *base, uint32_t val)
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief FIFO depth in entries (hardware constant). */
-static inline uint8_t DMA_FIFO_DEPTH_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_fifo_depth_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[4] & 0x000000FFU) >> 0U);
 }
 
 /** @brief Write 1 to flush FIFO. Self-clearing. */
-static inline void DMA_FIFO_FLUSH_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_fifo_flush_set(volatile uint32_t *base, uint32_t val)
 {
     base[4] = ((uint32_t)val << 8U) & 0x00000100U;
 }

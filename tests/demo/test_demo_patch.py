@@ -189,7 +189,7 @@ class TestPatchOutput:
 
     def test_access_changed_mode_setter_gone(self, patched_content):
         import re
-        setters = re.findall(r'\bDMA_CTRL_MODE_set\s*\(', patched_content)
+        setters = re.findall(r'\blld_dma_ctrl_mode_set\s*\(', patched_content)
         assert not setters, f"MODE_set should not exist after ACCESS_CHANGED: {setters}"
 
     # Type 9 — OFFSET_CHANGED (THRESH shift 8→9)
@@ -213,8 +213,8 @@ class TestPatchOutput:
 
     def test_multi_changed_priority_setter_gone(self, patched_content):
         import re
-        setters = re.findall(r'\bDMA_CTRL_PRIORITY_set\s*\(', patched_content)
-        assert not setters, f"PRIORITY_set should not exist after MULTI_CHANGED→RO: {setters}"
+        setters = re.findall(r'\blld_dma_ctrl_priority_set\s*\(', patched_content)
+        assert not setters, f"PRIORITY_set should not exist after MULTI_CHANGED->RO: {setters}"
 
     # Integrity check — unchanged FIFO block
     def test_fifo_block_preserved(self, patched_content):
