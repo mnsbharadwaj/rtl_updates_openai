@@ -161,12 +161,13 @@ class BatchRunner:
             )
             print(f"  Patched LLD written -> {job.out_lld}")
 
-            # Write test file to tests_dir
+            # Write test file to tests_dir (full coverage: all fields in new_ir)
             test_file = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
             patcher.write_test_file(
                 out_path=test_file,
                 sfr_new=job.new_sfr.name,
                 lld_new=job.out_lld.name,
+                new_ir=new_ir,          # ← ensures 100% function coverage
             )
             print(f"  Test file written  -> {test_file}")
 

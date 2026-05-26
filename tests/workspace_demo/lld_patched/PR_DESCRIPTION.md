@@ -38,8 +38,7 @@
 ## Git Diff Stat
 
 ```
-tests/workspace_demo/lld_patched/lld_pmu.h | 88 +++++++++++++++---------------
- 1 file changed, 44 insertions(+), 44 deletions(-)
+(no staged changes)
 ```
 
 ## Manual Review Checklist
