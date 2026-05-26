@@ -379,8 +379,8 @@ class TestLldPatcher:
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
 
-        assert "DMA_CONTROL_EN_get" in content
-        assert "DMA_CTRL_EN_get" not in content
+        assert "lld_dma_control_en_get" in content
+        assert "lld_dma_ctrl_en_get" not in content
 
     # T25
     def test_field_renamed_scoped_to_block(self, tmp_path):
@@ -403,9 +403,9 @@ class TestLldPatcher:
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
 
-        assert "DMA_CTRL_ENABLE_get" in content
-        assert "DMA_CTRL_MODE_get" in content   # MODE unchanged
-        assert "DMA_CTRL_EN_get" not in content
+        assert "lld_dma_ctrl_enable_get" in content
+        assert "lld_dma_ctrl_mode_get" in content   # MODE unchanged
+        assert "lld_dma_ctrl_en_get" not in content
 
     # T26
     def test_bitwidth_changed_updates_return_type(self, tmp_path):
@@ -445,7 +445,7 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "DMA_STATUS_FLAG_clear" in content
+        assert "lld_dma_status_flag_clear" in content
         # W1C should have _get and _clear — no standalone _set function
         # (The _set text may appear in function names like _set1 or in comments; check for the _set( signature)
         import re as _re
@@ -467,7 +467,7 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "DMA_CTRL_EN_get" not in content
+        assert "lld_dma_ctrl_en_get" not in content
 
     # T29
     def test_field_deleted_removes_functions(self, tmp_path):
@@ -488,8 +488,8 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "DMA_CTRL_MODE_get" not in content
-        assert "DMA_CTRL_EN_get" in content
+        assert "lld_dma_ctrl_mode_get" not in content
+        assert "lld_dma_ctrl_en_get" in content
 
     # T30
     def test_field_added_inserts_functions(self, tmp_path):
@@ -510,7 +510,7 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "DMA_CTRL_MODE_get" in content
+        assert "lld_dma_ctrl_mode_get" in content
 
     # T31
     def test_reg_added_inserts_block(self, tmp_path):
@@ -530,7 +530,7 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "DMA_STATUS_BUSY_get" in content
+        assert "lld_dma_status_busy_get" in content
 
     # T32
     def test_unchanged_block_bit_identical(self, tmp_path):
@@ -645,30 +645,30 @@ class TestTemplateGeneration:
     def test_ro_generates_getter_only(self):
         f   = self._make_field("RO", 0, 0)
         code = generate_field_functions("DMA", "CTRL", f, reg_offset=0)
-        assert "DMA_CTRL_EN_get" in code
-        assert "DMA_CTRL_EN_set" not in code
+        assert "lld_dma_ctrl_en_get" in code
+        assert "lld_dma_ctrl_en_set" not in code
 
     # T39
     def test_rw_generates_getter_and_setter(self):
         f   = self._make_field("RW", 0, 0)
         code = generate_field_functions("DMA", "CTRL", f, reg_offset=0)
-        assert "DMA_CTRL_EN_get" in code
-        assert "DMA_CTRL_EN_set" in code
+        assert "lld_dma_ctrl_en_get" in code
+        assert "lld_dma_ctrl_en_set" in code
 
     # T40
     def test_wo_generates_setter_only(self):
         f   = self._make_field("WO", 0, 0)
         code = generate_field_functions("DMA", "CTRL", f, reg_offset=0)
-        assert "DMA_CTRL_EN_get" not in code
-        assert "DMA_CTRL_EN_set" in code
+        assert "lld_dma_ctrl_en_get" not in code
+        assert "lld_dma_ctrl_en_set" in code
 
     # T41
     def test_w1c_generates_getter_and_clear(self):
         f   = self._make_field("W1C", 2, 2)
         code = generate_field_functions("DMA", "CTRL", f, reg_offset=0)
-        assert "DMA_CTRL_EN_get" in code
-        assert "DMA_CTRL_EN_clear" in code
-        assert "DMA_CTRL_EN_set" not in code
+        assert "lld_dma_ctrl_en_get" in code
+        assert "lld_dma_ctrl_en_clear" in code
+        assert "lld_dma_ctrl_en_set" not in code
 
     # T42
     def test_word_offset_correct_for_nonzero_register(self):

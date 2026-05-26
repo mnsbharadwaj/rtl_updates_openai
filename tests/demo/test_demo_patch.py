@@ -135,38 +135,38 @@ class TestPatchOutput:
 
     # Type 1 — REG_RENAMED
     def test_reg_renamed_new_name_present(self, patched_content):
-        assert "DMA_CHANNEL_SRC_ADDR_get" in patched_content
+        assert "lld_dma_channel_src_addr_get" in patched_content
 
     def test_reg_renamed_old_name_gone(self, patched_content):
-        assert "DMA_CHAN_SRC_ADDR_get" not in patched_content
+        assert "lld_dma_chan_src_addr_get" not in patched_content
 
     # Type 2 — REG_DELETED
     def test_reg_deleted_block_gone(self, patched_content):
-        assert "DMA_DEBUG_DBG_EN_get" not in patched_content
-        assert "DMA_DEBUG_DBG_SEL_get" not in patched_content
+        assert "lld_dma_debug_dbg_en_get" not in patched_content
+        assert "lld_dma_debug_dbg_sel_get" not in patched_content
 
     # Type 3 — REG_ADDED
     def test_reg_added_irq_en_present(self, patched_content):
-        assert "DMA_IRQ_IRQ_EN_get" in patched_content
+        assert "lld_dma_irq_irq_en_get" in patched_content
 
     def test_reg_added_irq_status_present(self, patched_content):
-        assert "DMA_IRQ_IRQ_STATUS_get" in patched_content
+        assert "lld_dma_irq_irq_status_get" in patched_content
 
     # Type 4 — FIELD_RENAMED
     def test_field_renamed_enable_present(self, patched_content):
-        assert "DMA_CTRL_ENABLE_get" in patched_content
+        assert "lld_dma_ctrl_enable_get" in patched_content
 
     def test_field_renamed_en_gone(self, patched_content):
-        assert "DMA_CTRL_EN_get" not in patched_content
+        assert "lld_dma_ctrl_en_get" not in patched_content
 
     # Type 5 — FIELD_DELETED
     def test_field_deleted_done_gone(self, patched_content):
-        assert "DMA_STATUS_DONE_get" not in patched_content
-        assert "DMA_STATUS_DONE_clear" not in patched_content
+        assert "lld_dma_status_done_get" not in patched_content
+        assert "lld_dma_status_done_clear" not in patched_content
 
     # Type 6 — FIELD_ADDED
     def test_field_added_busy_present(self, patched_content):
-        assert "DMA_STATUS_BUSY_get" in patched_content
+        assert "lld_dma_status_busy_get" in patched_content
 
     # Type 7 — BITWIDTH_CHANGED (BURST mask 0xE → 0x1E)
     def test_bitwidth_burst_new_mask(self, patched_content):
@@ -185,7 +185,7 @@ class TestPatchOutput:
 
     # Type 8 — ACCESS_CHANGED (MODE: RW→RO, setter gone)
     def test_access_changed_mode_getter_present(self, patched_content):
-        assert "DMA_CTRL_MODE_get" in patched_content
+        assert "lld_dma_ctrl_mode_get" in patched_content
 
     def test_access_changed_mode_setter_gone(self, patched_content):
         import re
@@ -201,15 +201,15 @@ class TestPatchOutput:
 
     # Type 10 — RESET_CHANGED (SHA updated; LEVEL function still present)
     def test_reset_changed_level_still_present(self, patched_content):
-        assert "DMA_STATUS_LEVEL_get" in patched_content
+        assert "lld_dma_status_level_get" in patched_content
 
     # Type 11 — COMMENT_CHANGED (TIMEOUT functions present in template-fallback mode)
     def test_comment_changed_timeout_present(self, patched_content):
-        assert "DMA_CTRL_TIMEOUT_get" in patched_content
+        assert "lld_dma_ctrl_timeout_get" in patched_content
 
     # Type 12 — MULTI_CHANGED (PRIORITY: RW→RO, setter gone)
     def test_multi_changed_priority_getter_present(self, patched_content):
-        assert "DMA_CTRL_PRIORITY_get" in patched_content
+        assert "lld_dma_ctrl_priority_get" in patched_content
 
     def test_multi_changed_priority_setter_gone(self, patched_content):
         import re
@@ -218,8 +218,8 @@ class TestPatchOutput:
 
     # Integrity check — unchanged FIFO block
     def test_fifo_block_preserved(self, patched_content):
-        assert "DMA_FIFO_DEPTH_get" in patched_content
-        assert "DMA_FIFO_FLUSH_set" in patched_content
+        assert "lld_dma_fifo_depth_get" in patched_content
+        assert "lld_dma_fifo_flush_set" in patched_content
 
     # Structural integrity
     def test_brace_balance(self, patched_content):
