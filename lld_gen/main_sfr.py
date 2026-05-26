@@ -308,13 +308,66 @@ gcc: null            # Path to gcc (null = auto-search PATH)
 
 def _cmd_init_config(args: argparse.Namespace) -> None:
     out = Path(args.output)
+
+    # ── Write config file ────────────────────────────────────────────────────
+    out.parent.mkdir(parents=True, exist_ok=True)   # create workspace dir if needed
     if out.exists() and not args.force:
         print(f"[SKIP] {out} already exists. Use --force to overwrite.")
-        return
-    out.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
-    print(f"[OK] Config written -> {out}")
-    print("  Edit the directory paths, then run:")
-    print(f"  python -m lld_gen.main_sfr run-config --config {out}")
+    else:
+        out.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
+        print(f"[OK] Config written -> {out}")
+
+
+    # ── Auto-create all directories ──────────────────────────────────────────
+    base = out.parent
+    dirs = {
+        "old_sfr":          "Place your OLD SFR header files here (sfr_pmu.h, sfr_uart.h ...)",
+        "new_sfr":          "Place your NEW/UPDATED SFR header files here (sfr_pmu.h, sfr_uart.h ...)",
+        "lld":              "Place your existing LLD header files here (lld_pmu.h, lld_uart.h ...)\nThese files will NEVER be modified. Patched copies go to lld_patched/.",
+        "lld_patched":      "Patched LLD files will be written here automatically. Do not edit manually.",
+        "tests_generated":  "Generated unit test .c files will be written here automatically.",
+    }
+
+    print("\n[SETUP] Creating project directory structure...")
+    for dirname, description in dirs.items():
+        d = base / dirname
+        d.mkdir(parents=True, exist_ok=True)
+        readme = d / "README.txt"
+        if not readme.exists():
+            readme.write_text(
+                f"{dirname}/\n{'=' * len(dirname)}\n\n{description}\n\n"
+                f"File naming convention:\n"
+                f"  SFR files : sfr_<ipname>.h   (e.g. sfr_pmu.h, sfr_uart.h)\n"
+                f"  LLD files : lld_<ipname>.h   (e.g. lld_pmu.h, lld_uart.h)\n"
+                f"              OR <ipname>_lld.h (e.g. pmu_lld.h)\n",
+                encoding="utf-8",
+            )
+        status = "[created]" if not (d / "README.txt").exists() else "[ready]  "
+        print(f"  {status} {d}")
+
+    print(f"""
+[DONE] Project workspace ready at: {base}
+
+  Directory layout:
+    {base}/
+    |-- lld_patcher.yaml      <- config file (edit paths if needed)
+    |-- old_sfr/              <- DROP your old SFR .h files here
+    |-- new_sfr/              <- DROP your new SFR .h files here
+    |-- lld/                  <- DROP your existing LLD .h files here
+    |-- lld_patched/          <- patched LLD files written here (auto)
+    `-- tests_generated/      <- unit test .c files written here (auto)
+
+  File naming (IP auto-detected):
+    sfr_pmu.h  ->  IP = PMU  ->  lld_pmu.h (or pmu_lld.h or pmu.h)
+    sfr_uart.h ->  IP = UART ->  lld_uart.h
+
+  Next steps:
+    1. Copy your old SFR files into old_sfr/
+    2. Copy your new SFR files into new_sfr/
+    3. Copy your existing LLD files into lld/
+    4. Run:
+         python -m lld_gen.main_sfr run-config --config {out}
+""")
 
 
 # ---------------------------------------------------------------------------
