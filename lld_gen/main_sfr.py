@@ -290,6 +290,23 @@ no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
 github_url: ""       # leave empty to auto-detect from git remote
 
 # -----------------------------------------------------------------------
+# Unit test generation mode
+# -----------------------------------------------------------------------
+# false (default) -- fast deterministic template tests
+#   Each LLD function gets a basic test: mask/shift/RMW isolation checks.
+#   No API calls, instant generation, fully reproducible.
+#
+# true            -- LLM-generated rich unit tests (requires LLM enabled)
+#   The LLM writes tests that also cover:
+#     - Boundary values (value=0, value=max_for_field)
+#     - RMW isolation (adjacent field bits must not be touched)
+#     - Reset value check (if register has non-zero reset)
+#     - Access constraint (RO: no setter; W1C: write-1-to-clear)
+#   Falls back silently to template if LLM fails or is unavailable.
+#   Requires: no_llm: false  AND  hf_token set (or HF_TOKEN env var)
+llm_test_gen: false
+
+# -----------------------------------------------------------------------
 # Compiler settings
 # -----------------------------------------------------------------------
 gcc: null            # Path to gcc (null = auto-search PATH)

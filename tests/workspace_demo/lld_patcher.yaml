@@ -24,6 +24,12 @@ hf_token: ""         # HuggingFace token (or set HF_TOKEN env variable)
 no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
 github_url: "https://github.com/mnsbharadwaj/rtl_updates_openai"
 
+# Unit test mode
+# false = fast template tests (mask/shift/RMW checks)  -- default
+# true  = LLM writes richer tests (boundaries, reset, access constraints)
+#         requires: no_llm: false  AND  hf_token set
+llm_test_gen: false
+
 # -----------------------------------------------------------------------
 # Compiler settings
 # -----------------------------------------------------------------------

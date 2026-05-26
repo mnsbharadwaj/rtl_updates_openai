@@ -810,23 +810,35 @@ class LLDPatcher:
 
     def write_test_file(
         self,
-        out_path:  str | Path,
-        sfr_new:   str,
-        lld_new:   str,
-        new_ir=None,           # SfrIR — if provided, tests generated for ALL fields
+        out_path:   str | Path,
+        sfr_new:    str,
+        lld_new:    str,
+        new_ir=None,        # SfrIR — if provided, tests generated for ALL fields
+        llm_client=None,    # LLMClient — if provided and llm_test_gen=True, use LLM
+        lld_text:   str = "",  # full text of patched lld.h for impl extraction
     ) -> str:
         """
         Write the auto-generated test file.
 
-        Coverage:
-          • If new_ir is provided  → 100% coverage: tests for EVERY field in
-            the patched LLD (unchanged + changed + added).
-          • If new_ir is None      → partial: tests only for changed fields
-            (legacy behaviour, kept for backward compatibility).
+        Coverage modes:
+          • new_ir provided + llm_client provided
+              → LLM writes rich tests (boundary values, RMW isolation, reset checks)
+                with template fallback per field if LLM fails
+          • new_ir provided, no llm_client
+              → Template tests for EVERY field (100% function coverage)
+          • new_ir=None
+              → Template tests for changed fields only (legacy)
+
+        LLM test generation:
+          - One LLM call per field (cached by reg+field+access+desc key)
+          - Falls back silently to template if LLM unavailable or call fails
+          - Skips LLM for IRQ helpers (always template — they are trivial)
         """
         out_path = Path(out_path)
+        use_llm  = llm_client is not None and getattr(llm_client, "available", False)
 
         all_stubs: List[str] = []
+        llm_count = template_count = 0
 
         if new_ir is not None:
             # ── Full coverage path ───────────────────────────────────────────
@@ -834,27 +846,72 @@ class LLDPatcher:
             for reg_name in sorted(new_ir.registers):
                 reg = new_ir.registers[reg_name]
                 for fname in sorted(reg.fields):
-                    fld  = reg.fields[fname]
-                    key  = f"{reg_name}.{fname}"
+                    fld = reg.fields[fname]
+                    key = f"{reg_name}.{fname}"
                     if key in seen:
                         continue
                     seen.add(key)
-                    # Core access stubs
-                    stub = generate_test_for_field(self.ip, reg_name, fld, reg.offset)
+
+                    stub = ""
+                    if use_llm:
+                        # Build fn_list for prompt
+                        fn_base  = f"lld_{self.ip.lower()}_{reg_name.lower()}_{fname.lower()}"
+                        fns      = []
+                        acc      = fld.access.upper()
+                        if acc in {"RO", "RW", "W1C", "W1S"}:
+                            fns.append(f"{fn_base}_get")
+                        if acc == "RW":
+                            fns.append(f"{fn_base}_set")
+                        if acc == "WO":
+                            fns.append(f"{fn_base}_set")
+                        if acc == "W1C":
+                            fns.append(f"{fn_base}_clear")
+                        if acc == "W1S":
+                            fns.append(f"{fn_base}_set1")
+
+                        # Extract reference impl from lld_text
+                        impl = extract_all_functions_for_field(
+                            lld_text, self.ip, reg_name, fname
+                        ) if lld_text else ""
+
+                        width = fld.msb - fld.lsb + 1
+                        stub  = llm_client.generate_test(
+                            ip=self.ip, reg_name=reg_name, reg_offset=reg.offset,
+                            field_name=fname, msb=fld.msb, lsb=fld.lsb,
+                            access=fld.access, desc=fld.desc or "",
+                            mask=fld.mask, shift=fld.shift, width=width,
+                            reset_val=getattr(fld, "reset_val", 0) or 0,
+                            fn_list=", ".join(fns),
+                            impl=impl,
+                        )
+
                     if stub:
                         all_stubs.append(stub)
-                    # IRQ helper stubs
+                        llm_count += 1
+                    else:
+                        # Template fallback
+                        tmpl = generate_test_for_field(self.ip, reg_name, fld, reg.offset)
+                        if tmpl:
+                            all_stubs.append(tmpl)
+                        template_count += 1
+
+                    # IRQ helpers — always template (trivial, no LLM needed)
                     if _is_irq_field(fld):
                         all_stubs.extend(
                             self._irq_test_stubs(self.ip, reg_name, fld, reg.offset)
                         )
         else:
             # ── Partial (legacy) path ────────────────────────────────────────
-            all_stubs = list(self._test_stubs)
+            all_stubs    = list(self._test_stubs)
+            template_count = len(all_stubs)
+
+        mode = "ALL fields"
+        if use_llm:
+            mode += f" | LLM={llm_count} Template={template_count}"
 
         header = (
             f"/* AUTO-GENERATED by lld_gen -- DO NOT EDIT */\n"
-            f"/* Coverage: {'ALL fields in patched LLD' if new_ir else 'changed fields only'} */\n"
+            f"/* Coverage: {mode} */\n"
             f"#include <stdint.h>\n"
             f"#include <assert.h>\n"
             f'#include "{sfr_new}"\n'
@@ -864,8 +921,7 @@ class LLDPatcher:
         body   = "\n\n".join(all_stubs)
         runner = "\n\nint main(void) {\n"
         for stub in all_stubs:
-            m = re.search(r"static void (test_\w+)\(void\)", stub)
-            if m:
+            for m in re.finditer(r"static void (test_\w+)\(void\)", stub):
                 runner += f"    {m.group(1)}();\n"
         runner += "    return 0;\n}\n"
 

@@ -52,18 +52,19 @@ class IPJob:
 @dataclass
 class PatcherConfig:
     """Parsed configuration from lld_patcher.yaml."""
-    sfr_old_dir: Path
-    sfr_new_dir: Path
-    lld_dir:     Path
-    output_dir:  Path
-    tests_dir:   Path
-    no_llm:      bool
-    no_git:      bool
-    hf_token:    str
-    gcc:         Optional[str]
-    github_url:  str                  = ""   # e.g. https://github.com/user/repo
-    ip_overrides: Dict[str, dict]     = field(default_factory=dict)
-    ip_list:     List[str]            = field(default_factory=list)
+    sfr_old_dir:   Path
+    sfr_new_dir:   Path
+    lld_dir:       Path
+    output_dir:    Path
+    tests_dir:     Path
+    no_llm:        bool
+    no_git:        bool
+    hf_token:      str
+    gcc:           Optional[str]
+    github_url:    str               = ""    # e.g. https://github.com/user/repo
+    llm_test_gen:  bool              = False  # true = use LLM to write richer unit tests
+    ip_overrides:  Dict[str, dict]   = field(default_factory=dict)
+    ip_list:       List[str]         = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -114,11 +115,12 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         lld_dir      = lld_dir,
         output_dir   = out_dir,
         tests_dir    = tst_dir,
-        no_llm       = bool(data.get("no_llm",   True)),
-        no_git       = bool(data.get("no_git",   True)),
-        hf_token     = str(data.get("hf_token",  "") or ""),
+        no_llm       = bool(data.get("no_llm",        True)),
+        no_git       = bool(data.get("no_git",        True)),
+        hf_token     = str(data.get("hf_token",       "") or ""),
         gcc          = data.get("gcc") or None,
-        github_url   = str(data.get("github_url", "") or ""),
+        github_url   = str(data.get("github_url",     "") or ""),
+        llm_test_gen = bool(data.get("llm_test_gen",  False)),
         ip_overrides = dict(data.get("ip_overrides") or {}),
         ip_list      = list(data.get("ip_list") or []),
     )

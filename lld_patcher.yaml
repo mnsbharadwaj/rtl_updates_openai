@@ -35,6 +35,7 @@ tests_dir:   "./tests_generated" # Where test_lld_*.c files are written
 # LLM settings
 # ---------------------------------------------------------------------------
 no_llm:   true                   # true = use template fallback (no LLM needed)
+llm_test_gen: false              # LLM-generated unit tests (false = template, true = rich)
 hf_token: ""                     # HuggingFace token (or set HF_TOKEN env var)
 
 # ---------------------------------------------------------------------------

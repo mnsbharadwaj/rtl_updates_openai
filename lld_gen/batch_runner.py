@@ -162,14 +162,19 @@ class BatchRunner:
             print(f"  Patched LLD written -> {job.out_lld}")
 
             # Write test file to tests_dir (full coverage: all fields in new_ir)
-            test_file = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
+            test_file    = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
+            lld_text     = job.out_lld.read_text(encoding="utf-8") if job.out_lld.exists() else ""
+            llm_test_gen = bool(self.cfg.llm_test_gen)
             patcher.write_test_file(
-                out_path=test_file,
-                sfr_new=job.new_sfr.name,
-                lld_new=job.out_lld.name,
-                new_ir=new_ir,          # ← ensures 100% function coverage
+                out_path   = test_file,
+                sfr_new    = job.new_sfr.name,
+                lld_new    = job.out_lld.name,
+                new_ir     = new_ir,                           # ensures 100% function coverage
+                llm_client = llm if llm_test_gen else None,    # LLM only if config says so
+                lld_text   = lld_text,                         # reference impl for LLM prompt
             )
-            print(f"  Test file written  -> {test_file}")
+            mode_tag = "[LLM+Template fallback]" if llm_test_gen else "[Template]"
+            print(f"  Test file written  -> {test_file}  {mode_tag}")
 
             # Step 3: Compile check
             print(f"\n  [3/4] Compile-check {job.ip}...")

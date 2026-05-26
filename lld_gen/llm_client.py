@@ -62,6 +62,47 @@ Old function text (for reference):
 Generate the updated C function(s) following SKILL.md conventions exactly.
 """
 
+# ---------------------------------------------------------------------------
+# Prompt template for LLM-generated unit tests
+# ---------------------------------------------------------------------------
+_TEST_SYSTEM_PROMPT = """\
+You are an expert embedded C firmware test engineer.
+Generate ONLY raw C code -- no prose, no markdown fences, no #include lines.
+Write static void test functions using:
+  volatile uint32_t regs[256] = {0};   as mock register space
+  assert() for all checks
+Rules:
+  - Test boundary values (0, max value in field)
+  - Test read-modify-write isolation (other field bits must be unchanged)
+  - Test reset value if non-zero
+  - Test access constraint (RO fields: no set function; W1C: write-1 clears)
+  - One test function per behaviour; name them test_{fn_name}_{scenario}()
+  - No malloc, no OS calls, no external dependencies
+"""
+
+_TEST_USER_PROMPT_TMPL = """\
+IP: {ip}
+Register: {reg_name}  byte offset: 0x{offset:04X}  word index: {widx}
+Field: {field_name}  bits [{msb}:{lsb}]  mask: 0x{mask:08X}  shift: {shift}
+Access: {access}
+Description: {desc}
+Reset value of field: 0x{reset_val:X}
+Max value in field: 0x{max_val:X}  ({width}-bit field)
+
+Functions to test:
+{fn_list}
+
+Reference implementation:
+{impl}
+
+Write thorough C unit tests covering:
+1. Normal get/set with value=1 and value=max
+2. RMW isolation: set field to 0 while register starts at 0xFFFFFFFF; verify other bits preserved
+3. Reset value check (if non-zero)
+4. Access constraint (if RO: getter works; setter must NOT exist; if W1C: clear writes 1-to-clear)
+"""
+
+
 _CACHE_DIR = Path(".lld_gen_cache")
 
 
@@ -265,3 +306,90 @@ class LLMClient:
         if not self.available:
             raise RuntimeError("LLM not available for compile-error fix.")
         return _strip_fences(self._call_api(user_msg))
+
+    def generate_test(
+        self,
+        ip:          str,
+        reg_name:    str,
+        reg_offset:  int,
+        field_name:  str,
+        msb:         int,
+        lsb:         int,
+        access:      str,
+        desc:        str,
+        mask:        int,
+        shift:       int,
+        width:       int,
+        reset_val:   int,
+        fn_list:     str,       # comma-separated function names to test
+        impl:        str,       # reference C implementation (from lld.h)
+    ) -> str:
+        """
+        Ask the LLM to write rich unit tests for one LLD field.
+
+        Returns raw C source (static void test_*() functions, no includes).
+        Returns empty string if LLM is not available -- caller falls back to template.
+
+        Test cache key is based on reg+field+access+desc so stable across runs.
+        """
+        key    = _cache_key(reg_name, field_name, f"TEST_{access}", desc)
+        cached = self._from_cache(key)
+        if cached is not None:
+            print(f"[LLM-TEST] Cache hit: {reg_name}.{field_name}")
+            return cached
+
+        if not self.available:
+            return ""   # caller will use template fallback
+
+        widx    = reg_offset // 4
+        max_val = (1 << width) - 1
+
+        user_msg = _TEST_USER_PROMPT_TMPL.format(
+            ip=ip, reg_name=reg_name, offset=reg_offset, widx=widx,
+            field_name=field_name, msb=msb, lsb=lsb,
+            mask=mask, shift=shift, access=access, desc=desc,
+            reset_val=reset_val, max_val=max_val, width=width,
+            fn_list=fn_list, impl=impl or "(not available)",
+        )
+
+        print(f"[LLM-TEST] Generating tests: {reg_name}.{field_name} ({access}) …")
+        try:
+            # Use the test-specific system prompt
+            headers = {
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type":  "application/json",
+            }
+            payload = {
+                "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                "messages": [
+                    {"role": "system", "content": _TEST_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_msg},
+                ],
+                "max_new_tokens": 768,
+                "temperature":    0.15,
+                "do_sample":      False,
+            }
+            resp = self._requests.post(
+                self.HF_API_URL, headers=headers, json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list) and data:
+                code = data[0].get("generated_text", "")
+            elif isinstance(data, dict):
+                choices = data.get("choices", [])
+                code = choices[0].get("message", {}).get("content", "") if choices \
+                       else data.get("generated_text", "")
+            else:
+                code = str(data)
+
+            code = _strip_fences(code)
+            if code:
+                self._to_cache(key, code)
+            return code
+
+        except Exception as exc:
+            print(f"[LLM-TEST] Failed for {reg_name}.{field_name}: {exc} -- using template")
+            return ""
+
