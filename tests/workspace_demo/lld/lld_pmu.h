@@ -18,13 +18,13 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief DMA enable */
-static inline uint8_t PMU_PMU_CON_DMA_EN_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_dma_en_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000001U) >> 0U);
 }
 
 /** @brief DMA enable */
-static inline void PMU_PMU_CON_DMA_EN_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_dma_en_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00000001U;
@@ -33,19 +33,19 @@ static inline void PMU_PMU_CON_DMA_EN_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief DMA pass status */
-static inline uint8_t PMU_PMU_CON_DMA_PASS_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_dma_pass_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000002U) >> 1U);
 }
 
 /** @brief HCPU reset control */
-static inline uint8_t PMU_PMU_CON_HCPU_RST_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_hcpu_rst_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000004U) >> 2U);
 }
 
 /** @brief HCPU reset control */
-static inline void PMU_PMU_CON_HCPU_RST_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_hcpu_rst_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00000004U;
@@ -54,13 +54,13 @@ static inline void PMU_PMU_CON_HCPU_RST_set(volatile uint32_t *base, uint32_t va
 }
 
 /** @brief HCPU vector init */
-static inline uint8_t PMU_PMU_CON_HCPU_VINIT_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_hcpu_vinit_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[0] & 0x00000008U) >> 3U);
 }
 
 /** @brief HCPU vector init */
-static inline void PMU_PMU_CON_HCPU_VINIT_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_hcpu_vinit_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[0];
     r &= ~0x00000008U;
@@ -75,37 +75,37 @@ static inline void PMU_PMU_CON_HCPU_VINIT_set(volatile uint32_t *base, uint32_t 
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief DMA done flag */
-static inline uint8_t PMU_STATUS_CON_DONE_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_done_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000001U) >> 0U);
 }
 
 /** @brief DMA done flag */
-static inline void PMU_STATUS_CON_DONE_clear(volatile uint32_t *base)
+static inline void lld_pmu_status_con_done_clear(volatile uint32_t *base)
 {
     base[1] = 0x00000001U; /* W1C: write 1 to clear */
 }
 
 /** @brief DMA error flag */
-static inline uint8_t PMU_STATUS_CON_ERR_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_err_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000004U) >> 2U);
 }
 
 /** @brief DMA fail flag */
-static inline uint8_t PMU_STATUS_CON_FAIL_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_fail_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000002U) >> 1U);
 }
 
 /** @brief FIFO level indicator */
-static inline uint8_t PMU_STATUS_CON_LEVEL_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_level_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000180U) >> 7U);
 }
 
 /** @brief FIFO level indicator */
-static inline void PMU_STATUS_CON_LEVEL_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_status_con_level_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[1];
     r &= ~0x00000180U;
@@ -114,13 +114,13 @@ static inline void PMU_STATUS_CON_LEVEL_set(volatile uint32_t *base, uint32_t va
 }
 
 /** @brief Threshold level 4-bit */
-static inline uint8_t PMU_STATUS_CON_THRESH_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_thresh_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[1] & 0x00000078U) >> 3U);
 }
 
 /** @brief Threshold level 4-bit */
-static inline void PMU_STATUS_CON_THRESH_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_status_con_thresh_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[1];
     r &= ~0x00000078U;
@@ -135,13 +135,13 @@ static inline void PMU_STATUS_CON_THRESH_set(volatile uint32_t *base, uint32_t v
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Clock divider ratio */
-static inline uint8_t PMU_CLK_CON_CLK_DIV_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_div_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x0000001EU) >> 1U);
 }
 
 /** @brief Clock divider ratio */
-static inline void PMU_CLK_CON_CLK_DIV_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_div_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x0000001EU;
@@ -150,13 +150,13 @@ static inline void PMU_CLK_CON_CLK_DIV_set(volatile uint32_t *base, uint32_t val
 }
 
 /** @brief Clock enable signal */
-static inline uint8_t PMU_CLK_CON_CLK_EN_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_en_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x00000001U) >> 0U);
 }
 
 /** @brief Clock enable signal */
-static inline void PMU_CLK_CON_CLK_EN_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_en_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x00000001U;
@@ -165,13 +165,13 @@ static inline void PMU_CLK_CON_CLK_EN_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Power gate control */
-static inline uint8_t PMU_CLK_CON_CLK_GATE_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_gate_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x00000080U) >> 7U);
 }
 
 /** @brief Power gate control */
-static inline void PMU_CLK_CON_CLK_GATE_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_gate_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x00000080U;
@@ -180,13 +180,13 @@ static inline void PMU_CLK_CON_CLK_GATE_set(volatile uint32_t *base, uint32_t va
 }
 
 /** @brief Clock source select signal */
-static inline uint8_t PMU_CLK_CON_CLK_SEL_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_sel_get(volatile uint32_t *base)
 {
     return (uint8_t)((base[2] & 0x00000060U) >> 5U);
 }
 
 /** @brief Clock source select signal */
-static inline void PMU_CLK_CON_CLK_SEL_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_sel_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[2];
     r &= ~0x00000060U;
@@ -201,13 +201,13 @@ static inline void PMU_CLK_CON_CLK_SEL_set(volatile uint32_t *base, uint32_t val
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Software timer reload value */
-static inline uint16_t PMU_SWT_CON_SCALL_get(volatile uint32_t *base)
+static inline uint16_t lld_pmu_swt_con_scall_get(volatile uint32_t *base)
 {
     return (uint16_t)((base[3] & 0xFFFF0000U) >> 16U);
 }
 
 /** @brief Software timer reload value */
-static inline void PMU_SWT_CON_SCALL_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_swt_con_scall_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[3];
     r &= ~0xFFFF0000U;
@@ -216,13 +216,13 @@ static inline void PMU_SWT_CON_SCALL_set(volatile uint32_t *base, uint32_t val)
 }
 
 /** @brief Software timer prescaler */
-static inline uint16_t PMU_SWT_CON_SCPRE_get(volatile uint32_t *base)
+static inline uint16_t lld_pmu_swt_con_scpre_get(volatile uint32_t *base)
 {
     return (uint16_t)((base[3] & 0x0000FFFFU) >> 0U);
 }
 
 /** @brief Software timer prescaler */
-static inline void PMU_SWT_CON_SCPRE_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_swt_con_scpre_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[3];
     r &= ~0x0000FFFFU;
@@ -237,13 +237,13 @@ static inline void PMU_SWT_CON_SCPRE_set(volatile uint32_t *base, uint32_t val)
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Retention control register */
-static inline uint32_t PMU_RST_CON_RET_CON_get(volatile uint32_t *base)
+static inline uint32_t lld_pmu_rst_con_ret_con_get(volatile uint32_t *base)
 {
     return (uint32_t)((base[4] & 0xFFFFFFFFU) >> 0U);
 }
 
 /** @brief Retention control register */
-static inline void PMU_RST_CON_RET_CON_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_rst_con_ret_con_set(volatile uint32_t *base, uint32_t val)
 {
     uint32_t r = base[4];
     r &= ~0xFFFFFFFFU;

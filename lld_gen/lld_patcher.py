@@ -121,8 +121,8 @@ def extract_function(text: str, fn_name: str) -> Optional[str]:
 
 
 def extract_all_functions_for_field(text: str, ip: str, reg: str, field: str) -> str:
-    """Extract all static inline functions for IP_REG_FIELD_* pattern."""
-    prefix = f"{ip}_{reg}_{field}_"
+    """Extract all static inline functions for lld_ip_reg_field_* pattern."""
+    prefix = f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_"
     parts  = []
     for m in _STATIC_INLINE_RE.finditer(text):
         fn_name = m.group(2)
@@ -137,7 +137,8 @@ def extract_all_functions_for_field(text: str, ip: str, reg: str, field: str) ->
 # Template code generators (SKILL.md conventions)
 # ---------------------------------------------------------------------------
 def _fn_name(ip: str, reg: str, field: str, verb: str) -> str:
-    return f"{ip.upper()}_{reg.upper()}_{field.upper()}_{verb}"
+    """Build LLD function name: lld_ip_reg_field_verb (all lowercase)."""
+    return f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_{verb.lower()}"
 
 
 def _word_idx(reg_offset: int) -> int:
@@ -216,7 +217,7 @@ def _w1s_set1(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
 def _irq_helpers(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     """Four mandatory IRQ helpers for interrupt-capable fields."""
     widx = _word_idx(reg_offset)
-    p    = f"{ip.upper()}_{reg.upper()}_{field.name.upper()}_IRQ"
+    p    = f"lld_{ip.lower()}_{reg.lower()}_{field.name.lower()}_irq"
     return (
         f"static inline void {p}_enable(volatile uint32_t *base)  "
         f"{{ base[{widx}] |=  0x{field.mask:08X}U; }}\n"
@@ -293,31 +294,29 @@ def generate_test_for_field(ip: str, reg_name: str, field: FieldIR, reg_offset: 
     Uses volatile uint32_t regs[256] = {0} as mock register space.
     No malloc, no OS primitives, no external dependencies.
     """
-    prefix = f"{ip.upper()}_{reg_name.upper()}_{field.name.upper()}"
-    widx   = _word_idx(reg_offset)
-    access = field.access.upper()
-    tests  = []
+    fn_base = f"lld_{ip.lower()}_{reg_name.lower()}_{field.name.lower()}"
+    widx    = _word_idx(reg_offset)
+    access  = field.access.upper()
+    tests   = []
 
     if access in {"RO", "RW", "W1C", "W1S"}:
-        # Getter test: set bits, assert getter returns correct value
-        shifted = 1  # smallest non-zero in-field value
+        shifted      = 1
         expected_raw = (shifted << field.shift) & field.mask
         tests.append(
-            f"static void test_{prefix}_get(void) {{\n"
+            f"static void test_{fn_base}_get(void) {{\n"
             f"    volatile uint32_t regs[256] = {{0}};\n"
             f"    regs[{widx}] = 0x{expected_raw:08X}U;\n"
-            f"    uint32_t v = (uint32_t){prefix}_get(regs);\n"
+            f"    uint32_t v = (uint32_t){fn_base}_get(regs);\n"
             f"    assert(v == {shifted}U);\n"
             f"}}"
         )
 
     if access == "RW":
-        # Setter test: call setter, verify RMW
         tests.append(
-            f"static void test_{prefix}_set(void) {{\n"
+            f"static void test_{fn_base}_set(void) {{\n"
             f"    volatile uint32_t regs[256] = {{0}};\n"
             f"    regs[{widx}] = 0xFFFFFFFFU;\n"
-            f"    {prefix}_set(regs, 0U);\n"
+            f"    {fn_base}_set(regs, 0U);\n"
             f"    assert((regs[{widx}] & 0x{field.mask:08X}U) == 0U);\n"
             f"    assert((regs[{widx}] & ~0x{field.mask:08X}U) == (~0x{field.mask:08X}U & 0xFFFFFFFFU));\n"
             f"}}"
@@ -325,27 +324,27 @@ def generate_test_for_field(ip: str, reg_name: str, field: FieldIR, reg_offset: 
 
     if access == "WO":
         tests.append(
-            f"static void test_{prefix}_set(void) {{\n"
+            f"static void test_{fn_base}_set(void) {{\n"
             f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {prefix}_set(regs, 1U);\n"
+            f"    {fn_base}_set(regs, 1U);\n"
             f"    assert((regs[{widx}] & 0x{field.mask:08X}U) != 0U);\n"
             f"}}"
         )
 
     if access == "W1C":
         tests.append(
-            f"static void test_{prefix}_clear(void) {{\n"
+            f"static void test_{fn_base}_clear(void) {{\n"
             f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {prefix}_clear(regs);\n"
+            f"    {fn_base}_clear(regs);\n"
             f"    assert(regs[{widx}] == 0x{field.mask:08X}U);\n"
             f"}}"
         )
 
     if access == "W1S":
         tests.append(
-            f"static void test_{prefix}_set1(void) {{\n"
+            f"static void test_{fn_base}_set1(void) {{\n"
             f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {prefix}_set1(regs);\n"
+            f"    {fn_base}_set1(regs);\n"
             f"    assert(regs[{widx}] == 0x{field.mask:08X}U);\n"
             f"}}"
         )
@@ -413,26 +412,23 @@ class LLDPatcher:
     # ── Template transformations ───────────────────────────────────────────
     def _rename_in_block(self, block: str, old_name: str, new_name: str) -> str:
         """Atomic string replace for all function name occurrences."""
-        old_ip_reg = f"{self.ip}_{old_name.upper()}"
-        new_ip_reg = f"{self.ip}_{new_name.upper()}"
+        old_ip_reg = f"lld_{self.ip.lower()}_{old_name.lower()}"
+        new_ip_reg = f"lld_{self.ip.lower()}_{new_name.lower()}"
         block = block.replace(old_ip_reg, new_ip_reg)
         block = block.replace(f"REGISTER: {old_name}", f"REGISTER: {new_name}")
         return block
 
     def _rename_field_in_block(self, block: str, old_field: str, new_field: str, reg_name: str) -> str:
         """Replace field name within the scoped register block."""
-        old_prefix = f"{self.ip}_{reg_name.upper()}_{old_field.upper()}"
-        new_prefix = f"{self.ip}_{reg_name.upper()}_{new_field.upper()}"
+        old_prefix = f"lld_{self.ip.lower()}_{reg_name.lower()}_{old_field.lower()}"
+        new_prefix = f"lld_{self.ip.lower()}_{reg_name.lower()}_{new_field.lower()}"
         return block.replace(old_prefix, new_prefix)
 
     def _update_return_type(self, block: str, field: FieldIR) -> str:
         """Substitute uint8_t/uint16_t/uint32_t/uint64_t based on new field width."""
         old_types = {"uint8_t", "uint16_t", "uint32_t", "uint64_t"}
         new_type  = field.return_type
-        fn_prefix = f"{self.ip}_{field.reg_name.upper()}_{field.name.upper()}_get"
-
-        def replace_rettype(m: re.Match) -> str:
-            return new_type
+        fn_prefix = f"lld_{self.ip.lower()}_{field.reg_name.lower()}_{field.name.lower()}_get"
 
         # Only replace return type in getter signature lines
         lines = block.splitlines(keepends=True)
@@ -454,12 +450,12 @@ class LLDPatcher:
         return re.sub(r"SRC_SHA:\s*[0-9a-f]+", f"SRC_SHA: {new_sha}", block)
 
     def _remove_field_functions(self, block: str, ip: str, reg: str, field: str) -> str:
-        """Remove all static inline functions for IP_REG_FIELD_* from block.
+        """Remove all static inline functions for lld_ip_reg_field_* from block.
 
         Uses character-based extraction to correctly handle Doxygen /** ... */
         comments that precede the function signature.
         """
-        prefix = f"{ip.upper()}_{reg.upper()}_{field.upper()}_"
+        prefix = f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_"
 
         # Collect spans to remove: (start, end) of each function including preceding doc comment
         to_remove: List[tuple] = []

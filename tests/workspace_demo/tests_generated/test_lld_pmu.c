@@ -4,140 +4,140 @@
 #include "sfr_pmu.h"
 #include "lld_pmu.h"
 
-static void test_PMU_STATUS_CON_ABORT_get(void) {
+static void test_lld_pmu_status_con_abort_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0x00000200U;
-    uint32_t v = (uint32_t)PMU_STATUS_CON_ABORT_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_status_con_abort_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_STATUS_CON_ABORT_set(void) {
+static void test_lld_pmu_status_con_abort_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0xFFFFFFFFU;
-    PMU_STATUS_CON_ABORT_set(regs, 0U);
+    lld_pmu_status_con_abort_set(regs, 0U);
     assert((regs[1] & 0x00000200U) == 0U);
     assert((regs[1] & ~0x00000200U) == (~0x00000200U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_STATUS_CON_ERR_get(void) {
+static void test_lld_pmu_status_con_err_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0x00000004U;
-    uint32_t v = (uint32_t)PMU_STATUS_CON_ERR_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_status_con_err_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_STATUS_CON_ERR_set(void) {
+static void test_lld_pmu_status_con_err_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0xFFFFFFFFU;
-    PMU_STATUS_CON_ERR_set(regs, 0U);
+    lld_pmu_status_con_err_set(regs, 0U);
     assert((regs[1] & 0x00000004U) == 0U);
     assert((regs[1] & ~0x00000004U) == (~0x00000004U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_STATUS_CON_LEVEL_get(void) {
+static void test_lld_pmu_status_con_level_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0x00000200U;
-    uint32_t v = (uint32_t)PMU_STATUS_CON_LEVEL_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_status_con_level_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_STATUS_CON_LEVEL_set(void) {
+static void test_lld_pmu_status_con_level_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0xFFFFFFFFU;
-    PMU_STATUS_CON_LEVEL_set(regs, 0U);
+    lld_pmu_status_con_level_set(regs, 0U);
     assert((regs[1] & 0x00000600U) == 0U);
     assert((regs[1] & ~0x00000600U) == (~0x00000600U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_STATUS_CON_THRESH_get(void) {
+static void test_lld_pmu_status_con_thresh_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0x00000008U;
-    uint32_t v = (uint32_t)PMU_STATUS_CON_THRESH_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_status_con_thresh_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_STATUS_CON_THRESH_set(void) {
+static void test_lld_pmu_status_con_thresh_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[1] = 0xFFFFFFFFU;
-    PMU_STATUS_CON_THRESH_set(regs, 0U);
+    lld_pmu_status_con_thresh_set(regs, 0U);
     assert((regs[1] & 0x000000F8U) == 0U);
     assert((regs[1] & ~0x000000F8U) == (~0x000000F8U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_CLK_CON_CLK_GATE_get(void) {
+static void test_lld_pmu_clk_con_clk_gate_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[2] = 0x00000080U;
-    uint32_t v = (uint32_t)PMU_CLK_CON_CLK_GATE_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_clk_con_clk_gate_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_CLK_CON_CLK_SEL_get(void) {
+static void test_lld_pmu_clk_con_clk_sel_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[2] = 0x00000020U;
-    uint32_t v = (uint32_t)PMU_CLK_CON_CLK_SEL_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_clk_con_clk_sel_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_CLK_CON_CLK_SEL_set(void) {
+static void test_lld_pmu_clk_con_clk_sel_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[2] = 0xFFFFFFFFU;
-    PMU_CLK_CON_CLK_SEL_set(regs, 0U);
+    lld_pmu_clk_con_clk_sel_set(regs, 0U);
     assert((regs[2] & 0x00000060U) == 0U);
     assert((regs[2] & ~0x00000060U) == (~0x00000060U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_IRQ_CON_IRQ_EN_get(void) {
+static void test_lld_pmu_irq_con_irq_en_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[4] = 0x00000001U;
-    uint32_t v = (uint32_t)PMU_IRQ_CON_IRQ_EN_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_irq_con_irq_en_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_IRQ_CON_IRQ_EN_set(void) {
+static void test_lld_pmu_irq_con_irq_en_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[4] = 0xFFFFFFFFU;
-    PMU_IRQ_CON_IRQ_EN_set(regs, 0U);
+    lld_pmu_irq_con_irq_en_set(regs, 0U);
     assert((regs[4] & 0x00000001U) == 0U);
     assert((regs[4] & ~0x00000001U) == (~0x00000001U & 0xFFFFFFFFU));
 }
 
-static void test_PMU_IRQ_CON_IRQ_PEND_get(void) {
+static void test_lld_pmu_irq_con_irq_pend_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[4] = 0x00000002U;
-    uint32_t v = (uint32_t)PMU_IRQ_CON_IRQ_PEND_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_irq_con_irq_pend_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_IRQ_CON_IRQ_PEND_clear(void) {
+static void test_lld_pmu_irq_con_irq_pend_clear(void) {
     volatile uint32_t regs[256] = {0};
-    PMU_IRQ_CON_IRQ_PEND_clear(regs);
+    lld_pmu_irq_con_irq_pend_clear(regs);
     assert(regs[4] == 0x00000002U);
 }
 
-static void test_PMU_IRQ_CON_IRQ_MASK_get(void) {
+static void test_lld_pmu_irq_con_irq_mask_get(void) {
     volatile uint32_t regs[256] = {0};
     regs[4] = 0x00000004U;
-    uint32_t v = (uint32_t)PMU_IRQ_CON_IRQ_MASK_get(regs);
+    uint32_t v = (uint32_t)lld_pmu_irq_con_irq_mask_get(regs);
     assert(v == 1U);
 }
 
-static void test_PMU_IRQ_CON_IRQ_MASK_set(void) {
+static void test_lld_pmu_irq_con_irq_mask_set(void) {
     volatile uint32_t regs[256] = {0};
     regs[4] = 0xFFFFFFFFU;
-    PMU_IRQ_CON_IRQ_MASK_set(regs, 0U);
+    lld_pmu_irq_con_irq_mask_set(regs, 0U);
     assert((regs[4] & 0x0000000CU) == 0U);
     assert((regs[4] & ~0x0000000CU) == (~0x0000000CU & 0xFFFFFFFFU));
 }
 
 int main(void) {
-    test_PMU_STATUS_CON_ABORT_get();
-    test_PMU_STATUS_CON_ERR_get();
-    test_PMU_STATUS_CON_LEVEL_get();
-    test_PMU_STATUS_CON_THRESH_get();
-    test_PMU_CLK_CON_CLK_GATE_get();
-    test_PMU_CLK_CON_CLK_SEL_get();
-    test_PMU_IRQ_CON_IRQ_EN_get();
-    test_PMU_IRQ_CON_IRQ_PEND_get();
-    test_PMU_IRQ_CON_IRQ_MASK_get();
+    test_lld_pmu_status_con_abort_get();
+    test_lld_pmu_status_con_err_get();
+    test_lld_pmu_status_con_level_get();
+    test_lld_pmu_status_con_thresh_get();
+    test_lld_pmu_clk_con_clk_gate_get();
+    test_lld_pmu_clk_con_clk_sel_get();
+    test_lld_pmu_irq_con_irq_en_get();
+    test_lld_pmu_irq_con_irq_pend_get();
+    test_lld_pmu_irq_con_irq_mask_get();
     return 0;
 }
