@@ -61,8 +61,9 @@ class PatcherConfig:
     no_git:      bool
     hf_token:    str
     gcc:         Optional[str]
-    ip_overrides: Dict[str, dict] = field(default_factory=dict)
-    ip_list:     List[str]        = field(default_factory=list)
+    github_url:  str                  = ""   # e.g. https://github.com/user/repo
+    ip_overrides: Dict[str, dict]     = field(default_factory=dict)
+    ip_list:     List[str]            = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +118,7 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         no_git       = bool(data.get("no_git",   True)),
         hf_token     = str(data.get("hf_token",  "") or ""),
         gcc          = data.get("gcc") or None,
+        github_url   = str(data.get("github_url", "") or ""),
         ip_overrides = dict(data.get("ip_overrides") or {}),
         ip_list      = list(data.get("ip_list") or []),
     )

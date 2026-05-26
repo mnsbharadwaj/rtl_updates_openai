@@ -195,6 +195,7 @@ class BatchRunner:
                 test_file=test_file,
                 sfr_new=job.new_sfr,
                 no_git=no_git,
+                github_url=self.cfg.github_url,
             )
 
             result.status = "OK"

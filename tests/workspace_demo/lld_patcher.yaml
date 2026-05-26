@@ -22,6 +22,7 @@ hf_token: ""         # HuggingFace token (or set HF_TOKEN env variable)
 # Git / PR settings
 # -----------------------------------------------------------------------
 no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
+github_url: "https://github.com/mnsbharadwaj/rtl_updates_openai"
 
 # -----------------------------------------------------------------------
 # Compiler settings

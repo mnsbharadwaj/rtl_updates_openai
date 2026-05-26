@@ -284,6 +284,11 @@ hf_token: ""         # HuggingFace token (or set HF_TOKEN env variable)
 # -----------------------------------------------------------------------
 no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
 
+# GitHub repository URL for PR creation link in PR_DESCRIPTION.md
+# Auto-detected from git remote origin if not set here.
+# Example: https://github.com/mnsbharadwaj/rtl_updates_openai
+github_url: ""       # leave empty to auto-detect from git remote
+
 # -----------------------------------------------------------------------
 # Compiler settings
 # -----------------------------------------------------------------------

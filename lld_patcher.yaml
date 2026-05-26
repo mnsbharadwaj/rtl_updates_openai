@@ -42,6 +42,10 @@ hf_token: ""                     # HuggingFace token (or set HF_TOKEN env var)
 # ---------------------------------------------------------------------------
 no_git:   true                   # true = skip git add / PR staging
 
+# GitHub repository URL -- used to generate the PR creation link
+github_url: "https://github.com/mnsbharadwaj/rtl_updates_openai"
+
+
 # ---------------------------------------------------------------------------
 # Compiler settings
 # ---------------------------------------------------------------------------
