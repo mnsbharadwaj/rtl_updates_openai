@@ -27,78 +27,63 @@
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Burst length in beats (0=single, 1=4-beat, 2=8-beat). */
-static inline uint8_t lld_dma_ctrl_burst_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_burst_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[0] & 0x0000000EU) >> 1U);
+    return (uint8_t)(lld->pSFR->stCTRL.stNative.BURST);
 }
 
 /** @brief Burst length in beats (0=single, 1=4-beat, 2=8-beat). */
-static inline void lld_dma_ctrl_burst_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_burst_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x0000000EU;
-    r |= ((uint32_t)val << 1U) & 0x0000000EU;
-    base[0] = r;
+    lld->pSFR->stCTRL.stNative.BURST = val;
 }
 
 /** @brief Enable DMA transfer. Write 1 to start. */
-static inline uint8_t lld_dma_ctrl_en_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_en_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[0] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stCTRL.stNative.EN);
 }
 
 /** @brief Enable DMA transfer. Write 1 to start. */
-static inline void lld_dma_ctrl_en_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_en_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00000001U;
-    r |= ((uint32_t)val << 0U) & 0x00000001U;
-    base[0] = r;
+    lld->pSFR->stCTRL.stNative.EN = val;
 }
 
 /** @brief Operation mode: 0=normal, 1=loopback, 2=scatter-gather. */
-static inline uint8_t lld_dma_ctrl_mode_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_mode_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[0] & 0x00000070U) >> 4U);
+    return (uint8_t)(lld->pSFR->stCTRL.stNative.MODE);
 }
 
 /** @brief Operation mode: 0=normal, 1=loopback, 2=scatter-gather. */
-static inline void lld_dma_ctrl_mode_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_mode_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00000070U;
-    r |= ((uint32_t)val << 4U) & 0x00000070U;
-    base[0] = r;
+    lld->pSFR->stCTRL.stNative.MODE = val;
 }
 
 /** @brief Transfer priority: 0=low, 1=normal, 2=high, 3=critical. */
-static inline uint8_t lld_dma_ctrl_priority_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_priority_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[0] & 0x00030000U) >> 16U);
+    return (uint8_t)(lld->pSFR->stCTRL.stNative.PRIORITY);
 }
 
 /** @brief Transfer priority: 0=low, 1=normal, 2=high, 3=critical. */
-static inline void lld_dma_ctrl_priority_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_priority_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00030000U;
-    r |= ((uint32_t)val << 16U) & 0x00030000U;
-    base[0] = r;
+    lld->pSFR->stCTRL.stNative.PRIORITY = val;
 }
 
 /** @brief Timeout counter value in bus cycles. */
-static inline uint8_t lld_dma_ctrl_timeout_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_ctrl_timeout_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[0] & 0x0000FF00U) >> 8U);
+    return (uint8_t)(lld->pSFR->stCTRL.stNative.TIMEOUT);
 }
 
 /** @brief Timeout counter value in bus cycles. */
-static inline void lld_dma_ctrl_timeout_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_ctrl_timeout_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x0000FF00U;
-    r |= ((uint32_t)val << 8U) & 0x0000FF00U;
-    base[0] = r;
+    lld->pSFR->stCTRL.stNative.TIMEOUT = val;
 }
 
 
@@ -109,48 +94,45 @@ static inline void lld_dma_ctrl_timeout_set(volatile uint32_t *base, uint32_t va
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Transfer complete flag. Write 1 to clear. */
-static inline uint8_t lld_dma_status_done_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_done_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[1] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.DONE);
 }
 
 /** @brief Transfer complete flag. Write 1 to clear. */
-static inline void lld_dma_status_done_clear(volatile uint32_t *base)
+static inline void lld_dma_status_done_clear(struct lld_dma *lld)
 {
-    base[1] = 0x00000001U; /* W1C: write 1 to clear */
+    lld->pSFR->stSTATUS.stNative.DONE = 1U; /* W1C: write 1 to clear */
 }
 
 /** @brief Error code: 0=none,1=bus_err,2=addr_err,3=timeout. */
-static inline uint8_t lld_dma_status_error_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_error_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[1] & 0x0000001CU) >> 2U);
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.ERROR);
 }
 
 /** @brief Current FIFO fill level in entries. */
-static inline uint8_t lld_dma_status_level_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_level_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[1] & 0x00FF0000U) >> 16U);
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.LEVEL);
 }
 
 /** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
-static inline uint8_t lld_dma_status_thresh_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_status_thresh_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[1] & 0x00007F00U) >> 8U);
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.THRESH);
 }
 
 /** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
-static inline void lld_dma_status_thresh_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_status_thresh_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[1];
-    r &= ~0x00007F00U;
-    r |= ((uint32_t)val << 8U) & 0x00007F00U;
-    base[1] = r;
+    lld->pSFR->stSTATUS.stNative.THRESH = val;
 }
 
-static inline void lld_dma_status_thresh_irq_enable(volatile uint32_t *base)  { base[1] |=  0x00007F00U; }
-static inline void lld_dma_status_thresh_irq_disable(volatile uint32_t *base) { base[1] &= ~0x00007F00U; }
-static inline uint32_t lld_dma_status_thresh_irq_status(volatile uint32_t *base) { return (base[1] & 0x00007F00U); }
-static inline void lld_dma_status_thresh_irq_clear(volatile uint32_t *base)   { base[1] = 0x00007F00U; }
+static inline void lld_dma_status_thresh_irq_enable(struct lld_dma *lld)  { lld->pSFR->stSTATUS.stNative.THRESH = 1U; }
+static inline void lld_dma_status_thresh_irq_disable(struct lld_dma *lld) { lld->pSFR->stSTATUS.stNative.THRESH = 0U; }
+static inline uint32_t lld_dma_status_thresh_irq_status(struct lld_dma *lld) { return (uint32_t)(lld->pSFR->stSTATUS.stNative.THRESH); }
+static inline void lld_dma_status_thresh_irq_clear(struct lld_dma *lld)   { lld->pSFR->stSTATUS.stNative.THRESH = 1U; } /* W1C */
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -160,33 +142,27 @@ static inline void lld_dma_status_thresh_irq_clear(volatile uint32_t *base)   { 
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Enable debug mode. Freezes pipeline for inspection. */
-static inline uint8_t lld_dma_debug_dbg_en_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_debug_dbg_en_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[2] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stDEBUG.stNative.DBG_EN);
 }
 
 /** @brief Enable debug mode. Freezes pipeline for inspection. */
-static inline void lld_dma_debug_dbg_en_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_debug_dbg_en_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[2];
-    r &= ~0x00000001U;
-    r |= ((uint32_t)val << 0U) & 0x00000001U;
-    base[2] = r;
+    lld->pSFR->stDEBUG.stNative.DBG_EN = val;
 }
 
 /** @brief Debug mux select: 0=fifo, 1=arb, 2=axi, 3=wrap. */
-static inline uint8_t lld_dma_debug_dbg_sel_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_debug_dbg_sel_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[2] & 0x0000000EU) >> 1U);
+    return (uint8_t)(lld->pSFR->stDEBUG.stNative.DBG_SEL);
 }
 
 /** @brief Debug mux select: 0=fifo, 1=arb, 2=axi, 3=wrap. */
-static inline void lld_dma_debug_dbg_sel_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_debug_dbg_sel_set(struct lld_dma *lld, uint8_t val)
 {
-    uint32_t r = base[2];
-    r &= ~0x0000000EU;
-    r |= ((uint32_t)val << 1U) & 0x0000000EU;
-    base[2] = r;
+    lld->pSFR->stDEBUG.stNative.DBG_SEL = val;
 }
 
 
@@ -197,18 +173,15 @@ static inline void lld_dma_debug_dbg_sel_set(volatile uint32_t *base, uint32_t v
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Source start address (must be word-aligned). */
-static inline uint32_t lld_dma_chan_src_addr_get(volatile uint32_t *base)
+static inline uint32_t lld_dma_chan_src_addr_get(struct lld_dma *lld)
 {
-    return (uint32_t)((base[3] & 0xFFFFFFFFU) >> 0U);
+    return (uint32_t)(lld->pSFR->stCHAN.stNative.SRC_ADDR);
 }
 
 /** @brief Source start address (must be word-aligned). */
-static inline void lld_dma_chan_src_addr_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_chan_src_addr_set(struct lld_dma *lld, uint32_t val)
 {
-    uint32_t r = base[3];
-    r &= ~0xFFFFFFFFU;
-    r |= ((uint32_t)val << 0U) & 0xFFFFFFFFU;
-    base[3] = r;
+    lld->pSFR->stCHAN.stNative.SRC_ADDR = val;
 }
 
 
@@ -219,15 +192,15 @@ static inline void lld_dma_chan_src_addr_set(volatile uint32_t *base, uint32_t v
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief FIFO depth in entries (hardware constant). */
-static inline uint8_t lld_dma_fifo_depth_get(volatile uint32_t *base)
+static inline uint8_t lld_dma_fifo_depth_get(struct lld_dma *lld)
 {
-    return (uint8_t)((base[4] & 0x000000FFU) >> 0U);
+    return (uint8_t)(lld->pSFR->stFIFO.stNative.DEPTH);
 }
 
 /** @brief Write 1 to flush FIFO. Self-clearing. */
-static inline void lld_dma_fifo_flush_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_dma_fifo_flush_set(struct lld_dma *lld, uint8_t val)
 {
-    base[4] = ((uint32_t)val << 8U) & 0x00000100U;
+    lld->pSFR->stFIFO.stNative.FLUSH = val;
 }
 
 

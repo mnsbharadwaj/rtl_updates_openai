@@ -1,47 +1,41 @@
 """
-lld_patcher.py — Surgical LLD Header Patcher
+lld_patcher.py — Surgical LLD Header Patcher (Struct-Based Architecture)
 
-Locates SRC_SHA anchor blocks in lld.h and applies surgical patches
-for each classified change. Unchanged blocks are copied verbatim.
+Generates and patches LLD functions that use a typed struct pointer parameter
+instead of raw `volatile uint32_t *base`.
 
-SRC_SHA block header format (in lld.h):
-    /* ═══════════════════════════════════════════════════════════════
-     * REGISTER: CTRL                     offset=0x0000
-     * DMA Control Register
-     * SRC_SHA: a1b2c3d4e5f6g7h8
-     * ═══════════════════════════════════════════════════════════════ */
+Function signature convention:
+    uint8_t  lld_pmu_status_con_thresh_get(struct lld_pmu *lld)
+    void     lld_pmu_status_con_thresh_set(struct lld_pmu *lld, uint8_t val)
 
-Processing rules per change type:
-    Template path (no LLM):
-        REG_RENAMED      → atomic string replace of all function names in block
-        FIELD_RENAMED    → string replace scoped to register block
-        BITWIDTH_CHANGED → substitute uint8_t / uint16_t / uint32_t / uint64_t
-        ACCESS_CHANGED   → regenerate function set from template
-        OFFSET_CHANGED   → update base[N] word-offset literal
-        RESET_CHANGED    → update SRC_SHA anchor comment only
-        REG_DELETED      → remove entire register block
-        FIELD_DELETED    → remove all _get/_set/_clear functions for field
+Bitfield access via SFR aggregate struct:
+    lld->pSFR->stSTATUS_CON.stNative.THRESH
 
-    LLM path (Qwen2.5-Coder-7B):
-        COMMENT_CHANGED  → LLM rewrites docstring + body
-        MULTI_CHANGED    → LLM handles all combined changes
-        REG_ADDED+desc   → LLM generates config() + all field accessors
-        FIELD_ADDED+desc → LLM generates getter/setter with inline comments
+SFR Aggregate Struct (auto-generated in lld header):
+    typedef volatile struct _SFR_PMU_S {
+        SFR_PMU_PMU_CTRL    stPMU_CTRL;
+        SFR_PMU_STATUS_CON  stSTATUS_CON;
+        ...
+    } SFR_PMU, *pSFR_PMU;
 
-Function generation conventions (from SKILL.md):
-    - Naming: IP_REG_FIELD_verb()
-    - Return type: uint8_t (1-8 bit), uint16_t (9-16), uint32_t (17-32), uint64_t (33-64)
-    - Word offset: base[byte_offset / 4]
-    - RO → getter; RW → getter+setter; WO → setter; W1C → getter+clear; W1S → getter+set1
-    - Setter: read-modify-write
-    - W1C clear: write mask directly (no read phase)
+    struct lld_pmu { pSFR_PMU pSFR; };
+
+Key rules:
+    1. Function NAMES are FROZEN — never change on REG_RENAMED
+       Only the struct member path inside the body is updated.
+    2. REG_DELETED → DEPRECATE (add comment, keep functions, list in PR)
+    3. FIELD_RENAMED / BITWIDTH / OFFSET → smart body patch only
+       (replace stNative.OLD_FIELD with stNative.NEW_FIELD)
+    4. ACCESS_CHANGED → add/remove setter as needed
+    5. COMMENT_CHANGED → update doxygen /** @brief ... */ only
+    6. Existing base[] functions are auto-migrated to struct style on first run
 """
 from __future__ import annotations
 
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from lld_gen.sfr_diff_analyzer import (
     ChangeRecord, ChangeType, FieldIR, RegisterIR, SfrIR,
@@ -53,25 +47,51 @@ from lld_gen.llm_client import LLMClient
 # SRC_SHA anchor patterns
 # ---------------------------------------------------------------------------
 _SHA_BLOCK_BEGIN = re.compile(
-    r"/\*\s*[═=]{10,}\s*\n"       # opening decoration line
-    r"\s*\*\s*REGISTER:\s*(\w+)"  # register name
-    r"[^\n]*\n"                   # rest of line (offset etc.)
-    r"(?:[^\n]*\n)*?"             # optional description lines
-    r"\s*\*\s*SRC_SHA:\s*([0-9a-f]+)"  # SRC_SHA
+    r"/\*\s*[═=]{10,}\s*\n"
+    r"\s*\*\s*REGISTER:\s*(\w+)"
     r"[^\n]*\n"
-    r"\s*\*\s*[═=]{10,}\s*\*/",   # closing decoration
+    r"(?:[^\n]*\n)*?"
+    r"\s*\*\s*SRC_SHA:\s*([0-9a-f]+)"
+    r"[^\n]*\n"
+    r"\s*\*\s*[═=]{10,}\s*\*/",
     re.DOTALL
 )
 
 _STATIC_INLINE_RE = re.compile(
-    r"(/\*\*.*?\*/\s*)?"                              # optional doxygen comment
-    r"static\s+inline\s+\S+\s+(\w+)\s*\([^)]*\)"    # signature
-    r"\s*\{",                                          # opening brace
+    r"(/\*\*.*?\*/\s*)?"
+    r"static\s+inline\s+\S+\s+(\w+)\s*\([^)]*\)"
+    r"\s*\{",
     re.DOTALL
 )
 
-_WORD_OFFSET_RE = re.compile(r"base\[(\d+)\]")
-_RETTYPE_RE     = re.compile(r"\b(uint8_t|uint16_t|uint32_t|uint64_t)\b")
+_RETTYPE_RE = re.compile(r"\b(uint8_t|uint16_t|uint32_t|uint64_t)\b")
+
+# Markers for the generated struct block
+_STRUCT_BEGIN_MARKER = "/* === BEGIN LLD_{ip}_STRUCTS ==="
+_STRUCT_END_MARKER   = "/* === END LLD_{ip}_STRUCTS === */"
+
+
+# ---------------------------------------------------------------------------
+# Naming helpers
+# ---------------------------------------------------------------------------
+def _fn_name(ip: str, reg: str, field: str, verb: str) -> str:
+    """Build LLD function name: lld_ip_reg_field_verb (all lowercase).
+    NOTE: Function names are FROZEN — reg name changes do NOT rename functions."""
+    return f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_{verb.lower()}"
+
+
+def _struct_member(reg_name: str) -> str:
+    """Convert register name to aggregate struct member: STATUS_CON -> stSTATUS_CON"""
+    return f"st{reg_name}"
+
+
+def _field_path(ip: str, reg_name: str, field_name: str) -> str:
+    """Full path to a bitfield via struct: lld->pSFR->stREG.stNative.FIELD"""
+    return f"lld->pSFR->{_struct_member(reg_name)}.stNative.{field_name}"
+
+
+def _word_idx(reg_offset: int) -> int:
+    return reg_offset // 4
 
 
 # ---------------------------------------------------------------------------
@@ -80,11 +100,8 @@ _RETTYPE_RE     = re.compile(r"\b(uint8_t|uint16_t|uint32_t|uint64_t)\b")
 def extract_function(text: str, fn_name: str) -> Optional[str]:
     """
     Extract a complete function body from C source text using brace counting.
-    Locates 'fn_name' in a static inline signature, then walks braces to find
-    the complete body.
-    Returns the full function text including signature, or None if not found.
+    Returns full function text including preceding doxygen comment, or None.
     """
-    # Find signature
     pattern = re.compile(
         r"(/\*\*.*?\*/\s*)?"
         r"static\s+inline\s+\S+\s+"
@@ -96,8 +113,8 @@ def extract_function(text: str, fn_name: str) -> Optional[str]:
     if not m:
         return None
 
-    start = m.start()
-    brace_pos = m.end() - 1  # position of opening {
+    start     = m.start()
+    brace_pos = m.end() - 1
 
     depth  = 0
     i      = brace_pos
@@ -117,7 +134,7 @@ def extract_function(text: str, fn_name: str) -> Optional[str]:
                 return text[start:i + 1]
         prev = ch
         i   += 1
-    return None  # unbalanced
+    return None
 
 
 def extract_all_functions_for_field(text: str, ip: str, reg: str, field: str) -> str:
@@ -134,110 +151,97 @@ def extract_all_functions_for_field(text: str, ip: str, reg: str, field: str) ->
 
 
 # ---------------------------------------------------------------------------
-# Template code generators (SKILL.md conventions)
+# Struct-based template code generators
 # ---------------------------------------------------------------------------
-def _fn_name(ip: str, reg: str, field: str, verb: str) -> str:
-    """Build LLD function name: lld_ip_reg_field_verb (all lowercase)."""
-    return f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_{verb.lower()}"
-
-
-def _word_idx(reg_offset: int) -> int:
-    return reg_offset // 4
-
-
 def _getter(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
-    fn    = _fn_name(ip, reg, field.name, "get")
-    rt    = field.return_type
-    widx  = _word_idx(reg_offset)
-    desc  = field.desc or f"Get {field.name} field"
+    fn   = _fn_name(ip, reg, field.name, "get")
+    rt   = field.return_type
+    desc = field.desc or f"Get {field.name} field"
+    path = _field_path(ip, reg, field.name)
     return (
         f"/** @brief {desc} */\n"
-        f"static inline {rt} {fn}(volatile uint32_t *base)\n"
+        f"static inline {rt} {fn}(struct lld_{ip.lower()} *lld)\n"
         f"{{\n"
-        f"    return ({rt})((base[{widx}] & 0x{field.mask:08X}U) >> {field.shift}U);\n"
+        f"    return ({rt})({path});\n"
         f"}}"
     )
 
 
 def _setter(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     fn   = _fn_name(ip, reg, field.name, "set")
-    widx = _word_idx(reg_offset)
+    rt   = field.return_type
     desc = field.desc or f"Set {field.name} field"
+    path = _field_path(ip, reg, field.name)
     return (
         f"/** @brief {desc} */\n"
-        f"static inline void {fn}(volatile uint32_t *base, uint32_t val)\n"
+        f"static inline void {fn}(struct lld_{ip.lower()} *lld, {rt} val)\n"
         f"{{\n"
-        f"    uint32_t r = base[{widx}];\n"
-        f"    r &= ~0x{field.mask:08X}U;\n"
-        f"    r |= ((uint32_t)val << {field.shift}U) & 0x{field.mask:08X}U;\n"
-        f"    base[{widx}] = r;\n"
+        f"    {path} = val;\n"
         f"}}"
     )
 
 
 def _wo_setter(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     fn   = _fn_name(ip, reg, field.name, "set")
-    widx = _word_idx(reg_offset)
-    desc = field.desc or f"Write {field.name} field (WO)"
+    rt   = field.return_type
+    desc = field.desc or f"Write {field.name} (WO)"
+    path = _field_path(ip, reg, field.name)
     return (
         f"/** @brief {desc} */\n"
-        f"static inline void {fn}(volatile uint32_t *base, uint32_t val)\n"
+        f"static inline void {fn}(struct lld_{ip.lower()} *lld, {rt} val)\n"
         f"{{\n"
-        f"    base[{widx}] = ((uint32_t)val << {field.shift}U) & 0x{field.mask:08X}U;\n"
+        f"    {path} = val;\n"
         f"}}"
     )
 
 
 def _w1c_clear(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     fn   = _fn_name(ip, reg, field.name, "clear")
-    widx = _word_idx(reg_offset)
     desc = field.desc or f"Clear {field.name} (W1C)"
+    path = _field_path(ip, reg, field.name)
     return (
         f"/** @brief {desc} */\n"
-        f"static inline void {fn}(volatile uint32_t *base)\n"
+        f"static inline void {fn}(struct lld_{ip.lower()} *lld)\n"
         f"{{\n"
-        f"    base[{widx}] = 0x{field.mask:08X}U; /* W1C: write 1 to clear */\n"
+        f"    {path} = 1U; /* W1C: write 1 to clear */\n"
         f"}}"
     )
 
 
 def _w1s_set1(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     fn   = _fn_name(ip, reg, field.name, "set1")
-    widx = _word_idx(reg_offset)
     desc = field.desc or f"Set1 {field.name} (W1S)"
+    path = _field_path(ip, reg, field.name)
     return (
         f"/** @brief {desc} */\n"
-        f"static inline void {fn}(volatile uint32_t *base)\n"
+        f"static inline void {fn}(struct lld_{ip.lower()} *lld)\n"
         f"{{\n"
-        f"    base[{widx}] = 0x{field.mask:08X}U; /* W1S: write 1 to set */\n"
+        f"    {path} = 1U; /* W1S: write 1 to set */\n"
         f"}}"
     )
 
 
 def _irq_helpers(ip: str, reg: str, field: FieldIR, reg_offset: int) -> str:
     """Four mandatory IRQ helpers for interrupt-capable fields."""
-    widx = _word_idx(reg_offset)
+    lp   = f"struct lld_{ip.lower()} *lld"
     p    = f"lld_{ip.lower()}_{reg.lower()}_{field.name.lower()}_irq"
+    path = _field_path(ip, reg, field.name)
     return (
-        f"static inline void {p}_enable(volatile uint32_t *base)  "
-        f"{{ base[{widx}] |=  0x{field.mask:08X}U; }}\n"
-        f"static inline void {p}_disable(volatile uint32_t *base) "
-        f"{{ base[{widx}] &= ~0x{field.mask:08X}U; }}\n"
-        f"static inline uint32_t {p}_status(volatile uint32_t *base) "
-        f"{{ return (base[{widx}] & 0x{field.mask:08X}U); }}\n"
-        f"static inline void {p}_clear(volatile uint32_t *base)   "
-        f"{{ base[{widx}] = 0x{field.mask:08X}U; }}"
+        f"static inline void {p}_enable({lp})  {{ {path} = 1U; }}\n"
+        f"static inline void {p}_disable({lp}) {{ {path} = 0U; }}\n"
+        f"static inline uint32_t {p}_status({lp}) {{ return (uint32_t)({path}); }}\n"
+        f"static inline void {p}_clear({lp})   {{ {path} = 1U; }} /* W1C */"
     )
 
 
 def _is_irq_field(field: FieldIR) -> bool:
-    return "irq" in field.name.lower() or "interrupt" in field.desc.lower()
+    return "irq" in field.name.lower() or "interrupt" in (field.desc or "").lower()
 
 
 def generate_field_functions(
     ip: str, reg_name: str, field: FieldIR, reg_offset: int
 ) -> str:
-    """Generate complete function set for a field based on access type."""
+    """Generate complete struct-based function set for a field based on access type."""
     parts: List[str] = []
     access = field.access.upper()
 
@@ -258,12 +262,202 @@ def generate_field_functions(
     return "\n\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# SFR aggregate struct + LLD driver struct generator
+# ---------------------------------------------------------------------------
+def generate_lld_structs(ip: str, new_ir: SfrIR) -> str:
+    """
+    Generate the SFR aggregate typedef and lld driver struct for the top of lld_*.h.
+
+    Example output:
+        /* === BEGIN LLD_PMU_STRUCTS === */
+        typedef volatile struct _SFR_PMU_S {
+            SFR_PMU_PMU_CTRL   stPMU_CTRL;   /* offset 0x0000 */
+            ...
+        } SFR_PMU, *pSFR_PMU;
+
+        struct lld_pmu { pSFR_PMU pSFR; };
+        /* === END LLD_PMU_STRUCTS === */
+    """
+    ip_up = ip.upper()
+    ip_lo = ip.lower()
+
+    # Sort registers by offset
+    regs = sorted(new_ir.registers.values(), key=lambda r: r.offset)
+
+    lines = [
+        f"/* === BEGIN LLD_{ip_up}_STRUCTS === */",
+        f"/* SFR Aggregate Struct (auto-generated from new SFR — DO NOT EDIT) */",
+        f"typedef volatile struct _SFR_{ip_up}_S",
+        f"{{",
+    ]
+    for reg in regs:
+        type_name   = f"SFR_{ip_up}_{reg.name}"
+        member_name = _struct_member(reg.name)
+        lines.append(
+            f"    {type_name:<36} {member_name};  /* offset 0x{reg.offset:04X} */"
+        )
+    lines += [
+        f"}} SFR_{ip_up}, *pSFR_{ip_up};",
+        f"",
+        f"/* LLD Driver Struct */",
+        f"struct lld_{ip_lo} {{",
+        f"    pSFR_{ip_up} pSFR;  /* pointer to hardware register block */",
+        f"}};",
+        f"/* === END LLD_{ip_up}_STRUCTS === */",
+    ]
+    return "\n".join(lines)
+
+
+def _replace_struct_section(content: str, ip: str, new_struct_text: str) -> str:
+    """Replace existing LLD_IP_STRUCTS section or insert after first #include."""
+    ip_up = ip.upper()
+    begin = f"/* === BEGIN LLD_{ip_up}_STRUCTS ==="
+    end   = f"/* === END LLD_{ip_up}_STRUCTS === */"
+
+    b_pos = content.find(begin)
+    e_pos = content.find(end)
+
+    if b_pos != -1 and e_pos != -1:
+        # Replace existing section
+        return content[:b_pos] + new_struct_text + "\n" + content[e_pos + len(end):]
+
+    # Insert after last #include line
+    lines  = content.splitlines(keepends=True)
+    insert = 0
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("#include"):
+            insert = i + 1
+    lines.insert(insert, "\n" + new_struct_text + "\n\n")
+    return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Block migration (base[] → struct-based)
+# ---------------------------------------------------------------------------
+def _is_struct_based(block: str) -> bool:
+    """Return True if block already uses struct lld_* pointer style."""
+    return "lld->pSFR->" in block or "struct lld_" in block
+
+
+def _migrate_block_to_struct(
+    ip: str, block: str, reg_name: str, reg_ir: RegisterIR
+) -> str:
+    """
+    Migrate an old base[]-style register block to struct-based.
+    Regenerates each field's functions from the FieldIR data.
+    """
+    result = block
+    for fname in sorted(reg_ir.fields):
+        fld = reg_ir.fields[fname]
+        # Remove the old function(s) for this field
+        result = _remove_field_functions_raw(result, ip, reg_name, fname)
+        # Regenerate with new struct-based template
+        new_fns = generate_field_functions(ip, reg_name, fld, reg_ir.offset)
+        if new_fns.strip():
+            result = result.rstrip() + "\n\n" + new_fns + "\n"
+    return result
+
+
+def _remove_field_functions_raw(block: str, ip: str, reg: str, field: str) -> str:
+    """Remove all static inline functions for lld_ip_reg_field_* from block."""
+    prefix = f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_"
+
+    to_remove: List[Tuple[int, int]] = []
+    for m in _STATIC_INLINE_RE.finditer(block):
+        fn_name = m.group(2)
+        if not fn_name.startswith(prefix):
+            continue
+        fn_start = m.start()
+        before   = block[:fn_start]
+        doc_m    = re.search(r"/\*\*[^*]*(?:\*(?!/)[^*]*)*\*/\s*$", before, re.DOTALL)
+        if doc_m:
+            fn_start = fn_start - (len(before) - doc_m.start())
+        try:
+            brace_pos = block.index("{", m.start())
+        except ValueError:
+            continue
+        depth = 0
+        i     = brace_pos
+        while i < len(block):
+            ch = block[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    to_remove.append((fn_start, i + 1))
+                    break
+            i += 1
+
+    result = block
+    for start, end in sorted(to_remove, reverse=True):
+        tail_end = end
+        while tail_end < len(result) and result[tail_end] in "\n\r":
+            tail_end += 1
+        result = result[:start] + result[tail_end:]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Smart body patchers
+# ---------------------------------------------------------------------------
+def _patch_struct_member_ref(block: str, old_reg: str, new_reg: str) -> str:
+    """
+    Replace ->stOLD_REG. with ->stNEW_REG. in function bodies.
+    Used for REG_RENAMED — function names are NOT changed.
+    """
+    old_tok = f"->st{old_reg}."
+    new_tok = f"->st{new_reg}."
+    return block.replace(old_tok, new_tok)
+
+
+def _patch_field_name_in_body(
+    block: str, reg_name: str, old_field: str, new_field: str
+) -> str:
+    """
+    Replace stNative.OLD_FIELD with stNative.NEW_FIELD inside function bodies.
+    Used for FIELD_RENAMED — function names are NOT changed.
+    """
+    pattern = re.compile(
+        r'(->st' + re.escape(reg_name) + r'\.stNative\.)' + re.escape(old_field) + r'\b'
+    )
+    return pattern.sub(r'\g<1>' + new_field, block)
+
+
+def _patch_doxygen_desc(block: str, old_desc: str, new_desc: str) -> str:
+    """Replace @brief description text in doxygen comments."""
+    if old_desc and new_desc and old_desc != new_desc:
+        # Try exact match first
+        block = block.replace(f"@brief {old_desc}", f"@brief {new_desc}")
+    return block
+
+
+def _deprecate_block(block: str, reg_name: str) -> Tuple[str, List[str]]:
+    """
+    Mark a deleted register's block as deprecated.
+    Returns (annotated_block, list_of_function_names).
+    """
+    fn_names = re.findall(r"static\s+inline\s+\S+\s+(lld_\w+)\s*\(", block)
+    dep_header = (
+        f"\n/* ⚠ DEPRECATED: SFR register {reg_name} was DELETED in the new SFR version.\n"
+        f" * The functions below are no longer backed by hardware registers.\n"
+        f" * They are kept here to avoid compilation errors in IP emulation files.\n"
+        f" * Review the callers and MANUALLY DELETE these functions in a follow-up PR.\n"
+        f" * See PR_DESCRIPTION.md for the full list. */\n"
+    )
+    return dep_header + block, fn_names
+
+
+# ---------------------------------------------------------------------------
+# SRC_SHA helpers
+# ---------------------------------------------------------------------------
 def _sha16(reg: RegisterIR) -> str:
     return reg.sha16
 
 
 def _reg_block_header(ip: str, reg: RegisterIR) -> str:
-    sha = _sha16(reg)
+    sha  = _sha16(reg)
     line = "═" * 63
     return (
         f"/* {line}\n"
@@ -275,7 +469,7 @@ def _reg_block_header(ip: str, reg: RegisterIR) -> str:
 
 
 def generate_register_block(ip: str, reg: RegisterIR) -> str:
-    """Generate complete LLD block for a register (header + all field functions)."""
+    """Generate complete struct-based LLD block for a register."""
     lines = [_reg_block_header(ip, reg)]
     for fname in sorted(reg.fields):
         fld = reg.fields[fname]
@@ -285,67 +479,72 @@ def generate_register_block(ip: str, reg: RegisterIR) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Unit test generator
+# Unit test generator (struct-based)
 # ---------------------------------------------------------------------------
 def generate_test_for_field(ip: str, reg_name: str, field: FieldIR, reg_offset: int) -> str:
     """
-    Generate a static test function for one field.
+    Generate struct-based C test functions for one field.
 
-    Uses volatile uint32_t regs[256] = {0} as mock register space.
-    No malloc, no OS primitives, no external dependencies.
+    Uses:
+        SFR_{IP} sfr = {{0}};
+        struct lld_{ip} lld = {{ .pSFR = &sfr }};
     """
-    fn_base = f"lld_{ip.lower()}_{reg_name.lower()}_{field.name.lower()}"
-    widx    = _word_idx(reg_offset)
-    access  = field.access.upper()
-    tests   = []
+    fn_base    = f"lld_{ip.lower()}_{reg_name.lower()}_{field.name.lower()}"
+    ip_up      = ip.upper()
+    ip_lo      = ip.lower()
+    sm         = _struct_member(reg_name)                       # stSTATUS_CON
+    fpath      = f"sfr.{sm}.stNative.{field.name}"             # sfr.stSTATUS_CON.stNative.THRESH
+    access     = field.access.upper()
+    tests: List[str] = []
+
+    # Common struct init
+    sinit = (
+        f"    SFR_{ip_up} sfr = {{{{0}}}};\n"
+        f"    struct lld_{ip_lo} lld = {{ .pSFR = &sfr }};"
+    )
 
     if access in {"RO", "RW", "W1C", "W1S"}:
-        shifted      = 1
-        expected_raw = (shifted << field.shift) & field.mask
         tests.append(
             f"static void test_{fn_base}_get(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    regs[{widx}] = 0x{expected_raw:08X}U;\n"
-            f"    uint32_t v = (uint32_t){fn_base}_get(regs);\n"
-            f"    assert(v == {shifted}U);\n"
+            f"{sinit}\n"
+            f"    {fpath} = 1U;\n"
+            f"    assert({fn_base}_get(&lld) == 1U);\n"
             f"}}"
         )
 
     if access == "RW":
         tests.append(
             f"static void test_{fn_base}_set(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    regs[{widx}] = 0xFFFFFFFFU;\n"
-            f"    {fn_base}_set(regs, 0U);\n"
-            f"    assert((regs[{widx}] & 0x{field.mask:08X}U) == 0U);\n"
-            f"    assert((regs[{widx}] & ~0x{field.mask:08X}U) == (~0x{field.mask:08X}U & 0xFFFFFFFFU));\n"
+            f"{sinit}\n"
+            f"    {fn_base}_set(&lld, 1U);\n"
+            f"    assert({fpath} == 1U);\n"
             f"}}"
         )
 
     if access == "WO":
         tests.append(
             f"static void test_{fn_base}_set(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {fn_base}_set(regs, 1U);\n"
-            f"    assert((regs[{widx}] & 0x{field.mask:08X}U) != 0U);\n"
+            f"{sinit}\n"
+            f"    {fn_base}_set(&lld, 1U);\n"
+            f"    assert({fpath} != 0U);\n"
             f"}}"
         )
 
     if access == "W1C":
         tests.append(
             f"static void test_{fn_base}_clear(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {fn_base}_clear(regs);\n"
-            f"    assert(regs[{widx}] == 0x{field.mask:08X}U);\n"
+            f"{sinit}\n"
+            f"    {fn_base}_clear(&lld);\n"
+            f"    assert({fpath} == 1U); /* W1C: must write 1 */\n"
             f"}}"
         )
 
     if access == "W1S":
         tests.append(
             f"static void test_{fn_base}_set1(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {fn_base}_set1(regs);\n"
-            f"    assert(regs[{widx}] == 0x{field.mask:08X}U);\n"
+            f"{sinit}\n"
+            f"    {fn_base}_set1(&lld);\n"
+            f"    assert({fpath} == 1U);\n"
             f"}}"
         )
 
@@ -359,172 +558,106 @@ class LLDPatcher:
     """
     Surgically patches lld.h for a list of ChangeRecord objects.
 
-    Algorithm:
-    1. Split lld.h into SRC_SHA register blocks + free zones
-    2. For each change:
-       - Template path: apply deterministic transformation
-       - LLM path: call Qwen2.5-Coder-7B for new function text
-    3. Reassemble; validate brace balance; write back
-    4. Generate unit test stubs for all changed/added functions
+    New architecture (struct-based):
+      1. Regenerate / replace the LLD_IP_STRUCTS section from new_ir
+      2. Auto-migrate any base[]-style blocks to struct-based
+      3. For each change record → _apply()
+      4. Collect deprecated function names (deleted registers)
+      5. Write patched file + generate unit tests
     """
 
     def __init__(
         self,
-        ip:          str,
-        llm_client:  Optional[LLMClient] = None,
-        no_llm:      bool = False,
+        ip:         str,
+        llm_client: Optional[LLMClient] = None,
+        no_llm:     bool = False,
     ):
-        self.ip         = ip.upper()
-        self._llm       = llm_client
-        self._no_llm    = no_llm
+        self.ip           = ip.upper()
+        self._llm         = llm_client
+        self._no_llm      = no_llm
         self._test_stubs: List[str] = []
+        self._deprecated_fns: List[str] = []
 
-    # ── File split ─────────────────────────────────────────────────────────
-    def _split_blocks(self, text: str) -> List[Tuple[Optional[str], Optional[str], str]]:
-        """
-        Split lld.h into segments: (reg_name_or_None, sha_or_None, block_text).
-        Free zones have reg_name=None, sha=None.
-        """
+    # ── File split ──────────────────────────────────────────────────────────
+    def _split_blocks(
+        self, text: str
+    ) -> List[Tuple[Optional[str], Optional[str], str]]:
         segments: List[Tuple[Optional[str], Optional[str], str]] = []
         pos = 0
-
         for m in _SHA_BLOCK_BEGIN.finditer(text):
-            # Free zone before this block
             if m.start() > pos:
                 segments.append((None, None, text[pos:m.start()]))
-
-            reg_name = m.group(1)
-            sha      = m.group(2)
+            reg_name    = m.group(1)
+            sha         = m.group(2)
             block_start = m.start()
-
-            # Find the end of the register block: next SHA block or EOF
-            next_m = _SHA_BLOCK_BEGIN.search(text, m.end())
-            block_end = next_m.start() if next_m else len(text)
+            next_m      = _SHA_BLOCK_BEGIN.search(text, m.end())
+            block_end   = next_m.start() if next_m else len(text)
             segments.append((reg_name, sha, text[block_start:block_end]))
             pos = block_end
-
-        # Trailing free zone
         if pos < len(text):
             segments.append((None, None, text[pos:]))
-
         return segments
 
-    # ── Template transformations ───────────────────────────────────────────
-    def _rename_in_block(self, block: str, old_name: str, new_name: str) -> str:
-        """Atomic string replace for all function name occurrences."""
-        old_ip_reg = f"lld_{self.ip.lower()}_{old_name.lower()}"
-        new_ip_reg = f"lld_{self.ip.lower()}_{new_name.lower()}"
-        block = block.replace(old_ip_reg, new_ip_reg)
-        block = block.replace(f"REGISTER: {old_name}", f"REGISTER: {new_name}")
-        return block
-
-    def _rename_field_in_block(self, block: str, old_field: str, new_field: str, reg_name: str) -> str:
-        """Replace field name within the scoped register block."""
-        old_prefix = f"lld_{self.ip.lower()}_{reg_name.lower()}_{old_field.lower()}"
-        new_prefix = f"lld_{self.ip.lower()}_{reg_name.lower()}_{new_field.lower()}"
-        return block.replace(old_prefix, new_prefix)
-
-    def _update_return_type(self, block: str, field: FieldIR) -> str:
-        """Substitute uint8_t/uint16_t/uint32_t/uint64_t based on new field width."""
-        old_types = {"uint8_t", "uint16_t", "uint32_t", "uint64_t"}
-        new_type  = field.return_type
-        fn_prefix = f"lld_{self.ip.lower()}_{field.reg_name.lower()}_{field.name.lower()}_get"
-
-        # Only replace return type in getter signature lines
-        lines = block.splitlines(keepends=True)
-        result = []
-        for ln in lines:
-            if fn_prefix in ln and any(t in ln for t in old_types):
-                ln = _RETTYPE_RE.sub(new_type, ln, count=1)
-            result.append(ln)
-        return "".join(result)
-
-    def _update_word_offset(self, block: str, old_offset: int, new_offset: int) -> str:
-        """Update base[N] word-offset literal."""
-        old_widx = old_offset // 4
-        new_widx = new_offset // 4
-        return block.replace(f"base[{old_widx}]", f"base[{new_widx}]")
-
+    # ── SHA helpers ─────────────────────────────────────────────────────────
     def _update_sha_anchor(self, block: str, new_sha: str) -> str:
-        """Replace SRC_SHA value in the anchor comment."""
         return re.sub(r"SRC_SHA:\s*[0-9a-f]+", f"SRC_SHA: {new_sha}", block)
 
-    def _remove_field_functions(self, block: str, ip: str, reg: str, field: str) -> str:
-        """Remove all static inline functions for lld_ip_reg_field_* from block.
+    # ── Remove field functions ───────────────────────────────────────────────
+    def _remove_field_functions(
+        self, block: str, ip: str, reg: str, field: str
+    ) -> str:
+        return _remove_field_functions_raw(block, ip, reg, field)
 
-        Uses character-based extraction to correctly handle Doxygen /** ... */
-        comments that precede the function signature.
-        """
-        prefix = f"lld_{ip.lower()}_{reg.lower()}_{field.lower()}_"
-
-        # Collect spans to remove: (start, end) of each function including preceding doc comment
-        to_remove: List[tuple] = []
-
-        for m in _STATIC_INLINE_RE.finditer(block):
-            fn_name = m.group(2)
-            if not fn_name.startswith(prefix):
-                continue
-
-            # Walk back to include preceding /** ... */ doc comment
-            fn_start = m.start()
-            # Look backward from fn_start for a /** comment
-            before = block[:fn_start]
-            doc_match = re.search(r"/\*\*[^*]*(?:\*(?!/)[^*]*)*\*/\s*$", before, re.DOTALL)
-            if doc_match:
-                fn_start = fn_start - (len(before) - doc_match.start())
-
-            # Walk braces forward from opening brace to find function end
-            brace_pos = block.index("{", m.start())
-            depth  = 0
-            i      = brace_pos
-            in_str = False
-            prev   = ""
-            while i < len(block):
-                ch = block[i]
-                if in_str:
-                    if ch == '"' and prev != "\\": in_str = False
-                elif ch == '"': in_str = True
-                elif ch == "{": depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        fn_end = i + 1
-                        to_remove.append((fn_start, fn_end))
-                        break
-                prev = ch
-                i   += 1
-
-        if not to_remove:
-            return block
-
-        # Remove spans in reverse order to preserve offsets
-        result = block
-        for start, end in sorted(to_remove, reverse=True):
-            # Also strip trailing newline(s) after the closing brace
-            tail_end = end
-            while tail_end < len(result) and result[tail_end] in "\n\r":
-                tail_end += 1
-            result = result[:start] + result[tail_end:]
-        return result
-
+    # ── ACCESS_CHANGED helpers ───────────────────────────────────────────────
     def _regen_access_template(self, block: str, cr: ChangeRecord) -> str:
-        """Regenerate complete function set from template for ACCESS_CHANGED."""
+        """
+        For ACCESS_CHANGED:
+          - If now RO: remove setter(s) from block
+          - If now RW: add setter if missing
+          - If access type changes category (e.g. RW→W1C): regenerate full set
+        """
         new_f   = cr.new_field
+        old_f   = cr.old_field
         new_reg = cr.new_reg
         if new_f is None or new_reg is None:
             return block
-        # Remove old functions for this field
-        block = self._remove_field_functions(
-            block, self.ip, cr.reg_name, cr.field_name or ""
-        )
-        # Generate new functions and append before SHA block closes
-        new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
-        self._test_stubs.extend(self._make_test(cr))
-        # Insert before the #endif or closing comment region
-        return block.rstrip() + "\n\n" + new_fns + "\n"
 
+        old_acc = (old_f.access if old_f else "RW").upper()
+        new_acc = new_f.access.upper()
+        fn_pfx  = f"lld_{self.ip.lower()}_{cr.reg_name.lower()}_{new_f.name.lower()}"
+
+        # Simple RW → RO: remove setter only
+        if old_acc == "RW" and new_acc == "RO":
+            block = _remove_field_functions_raw(
+                block, self.ip, cr.reg_name, new_f.name + "_set_SENTINEL"
+            )
+            # Remove any function named ..._set
+            setter_fn = f"{fn_pfx}_set"
+            block     = _remove_field_functions_raw(block, self.ip, cr.reg_name,
+                         cr.field_name or "")
+            # Re-add only the getter
+            new_fns = _getter(self.ip, cr.reg_name, new_f, new_reg.offset)
+            block   = block.rstrip() + "\n\n" + new_fns + "\n"
+        # Simple RO → RW: add setter
+        elif old_acc == "RO" and new_acc == "RW":
+            new_fns = _setter(self.ip, cr.reg_name, new_f, new_reg.offset)
+            block   = block.rstrip() + "\n\n" + new_fns + "\n"
+        else:
+            # Category change: regenerate full set
+            block = _remove_field_functions_raw(block, self.ip, cr.reg_name,
+                                                cr.field_name or "")
+            new_fns = generate_field_functions(
+                self.ip, cr.reg_name, new_f, new_reg.offset
+            )
+            block = block.rstrip() + "\n\n" + new_fns + "\n"
+
+        if cr.new_reg:
+            block = self._update_sha_anchor(block, cr.new_reg.sha16)
+        self._test_stubs.extend(self._make_test(cr))
+        return block
+
+    # ── Test stub helpers ────────────────────────────────────────────────────
     def _make_test(self, cr: ChangeRecord) -> List[str]:
-        """Generate test code for a change record."""
         fld = cr.new_field
         reg = cr.new_reg
         if fld is None or reg is None:
@@ -532,9 +665,37 @@ class LLDPatcher:
         test = generate_test_for_field(self.ip, cr.reg_name, fld, reg.offset)
         return [test] if test else []
 
-    # ── LLM path ──────────────────────────────────────────────────────────
+    # ── IRQ helper tests ─────────────────────────────────────────────────────
+    @staticmethod
+    def _irq_test_stubs(ip: str, reg_name: str, field: FieldIR, reg_offset: int) -> List[str]:
+        ip_up   = ip.upper()
+        ip_lo   = ip.lower()
+        fn_base = f"lld_{ip_lo}_{reg_name.lower()}_{field.name.lower()}_irq"
+        sm      = _struct_member(reg_name)
+        fpath   = f"sfr.{sm}.stNative.{field.name}"
+        sinit   = (
+            f"    SFR_{ip_up} sfr = {{{{0}}}};\n"
+            f"    struct lld_{ip_lo} lld = {{ .pSFR = &sfr }};"
+        )
+        return [
+            f"static void test_{fn_base}_enable(void) {{\n{sinit}\n"
+            f"    {fn_base}_enable(&lld);\n"
+            f"    assert({fpath} == 1U);\n}}",
+            f"static void test_{fn_base}_disable(void) {{\n{sinit}\n"
+            f"    {fpath} = 1U;\n"
+            f"    {fn_base}_disable(&lld);\n"
+            f"    assert({fpath} == 0U);\n}}",
+            f"static void test_{fn_base}_status(void) {{\n{sinit}\n"
+            f"    {fpath} = 1U;\n"
+            f"    assert({fn_base}_status(&lld) != 0U);\n}}",
+            f"static void test_{fn_base}_clear(void) {{\n{sinit}\n"
+            f"    {fn_base}_clear(&lld);\n"
+            f"    assert({fpath} == 1U);\n}}",
+        ]
+
+    # ── LLM path ─────────────────────────────────────────────────────────────
     def _llm_regenerate(self, block: str, cr: ChangeRecord) -> str:
-        """Call Qwen2.5-Coder-7B to update function body for semantic changes."""
+        """Call LLM to update function body for semantic changes (COMMENT/MULTI)."""
         new_f   = cr.new_field
         old_f   = cr.old_field
         new_reg = cr.new_reg
@@ -549,12 +710,23 @@ class LLDPatcher:
 
         if self._no_llm or self._llm is None:
             print(f"  [LLM-SKIP] {cr.reg_name}.{cr.field_name} — using template fallback")
-            # Template fallback
-            if cr.field_name:
-                block = self._remove_field_functions(block, self.ip, cr.reg_name, cr.field_name)
-            new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
+            # Template fallback for COMMENT_CHANGED: patch the doxygen only
+            if cr.change_type == ChangeType.COMMENT_CHANGED and old_f and new_f:
+                block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
+            # For MULTI_CHANGED: patch field name ref + desc + update access
+            elif cr.change_type == ChangeType.MULTI_CHANGED:
+                if old_f and new_f:
+                    if old_f.name != new_f.name:
+                        block = _patch_field_name_in_body(
+                            block, cr.reg_name, old_f.name, new_f.name
+                        )
+                    block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
+                    if old_f.access != new_f.access:
+                        block = self._regen_access_template(block, cr)
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
             self._test_stubs.extend(self._make_test(cr))
-            return block.rstrip() + "\n\n" + new_fns + "\n"
+            return block
 
         try:
             new_code = self._llm.generate(
@@ -567,70 +739,67 @@ class LLDPatcher:
                 change_type=cr.change_type,
                 old_code=old_code,
             )
-            if cr.field_name:
-                block = self._remove_field_functions(block, self.ip, cr.reg_name, cr.field_name)
+            # Replace old function text with LLM output
+            field_key = old_f.name if old_f else new_f.name
+            block = _remove_field_functions_raw(block, self.ip, cr.reg_name, field_key)
             self._test_stubs.extend(self._make_test(cr))
             return block.rstrip() + "\n\n" + new_code + "\n"
         except RuntimeError as exc:
             print(f"  [LLM-ERROR] {exc}; using template fallback")
-            if cr.field_name:
-                block = self._remove_field_functions(block, self.ip, cr.reg_name, cr.field_name)
-            new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
             self._test_stubs.extend(self._make_test(cr))
-            return block.rstrip() + "\n\n" + new_fns + "\n"
+            return block
 
-    # ── Apply one change record ────────────────────────────────────────────
+    # ── Apply one change record ───────────────────────────────────────────────
     def _apply(self, block: str, sha: Optional[str], cr: ChangeRecord) -> str:
         ct = cr.change_type
 
         if ct == ChangeType.REG_RENAMED:
+            # FREEZE function names — only update struct member path in bodies
             old_name = cr.old_reg.name if cr.old_reg else cr.reg_name
             new_name = cr.new_reg.name if cr.new_reg else cr.reg_name
-            return self._rename_in_block(block, old_name, new_name)
+            block    = _patch_struct_member_ref(block, old_name, new_name)
+            # Update block header comment (register name display only)
+            block = block.replace(f"REGISTER: {old_name}", f"REGISTER: {new_name}")
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+            return block
 
         elif ct == ChangeType.FIELD_RENAMED:
+            # FREEZE function names — only update stNative.FIELD ref in bodies
             old_fname = cr.old_field.name if cr.old_field else (cr.field_name or "")
             new_fname = cr.new_field.name if cr.new_field else (cr.field_name or "")
-            return self._rename_field_in_block(block, old_fname, new_fname, cr.reg_name)
+            block = _patch_field_name_in_body(block, cr.reg_name, old_fname, new_fname)
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+            return block
 
         elif ct == ChangeType.BITWIDTH_CHANGED:
-            # Mask, shift, and return type all potentially changed.
-            # Safest: remove old functions and regenerate from new FieldIR.
+            # Struct-based: bitfield width handled by hardware struct.
+            # Only update return type in getter signature if type changes.
             new_f   = cr.new_field
             new_reg = cr.new_reg
             if new_f and new_reg:
-                block = self._remove_field_functions(
-                    block, self.ip, cr.reg_name, cr.field_name or ""
-                )
-                new_fns = generate_field_functions(
-                    self.ip, cr.reg_name, new_f, new_reg.offset
-                )
+                # Patch return type in getter signature line
+                fn_get = _fn_name(self.ip, cr.reg_name, new_f.name, "get")
+                lines  = block.splitlines(keepends=True)
+                result = []
+                for ln in lines:
+                    if fn_get in ln:
+                        ln = _RETTYPE_RE.sub(new_f.return_type, ln, count=1)
+                    result.append(ln)
+                block = "".join(result)
                 self._test_stubs.extend(self._make_test(cr))
-                block = block.rstrip() + "\n\n" + new_fns + "\n"
-            if cr.new_reg:
-                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+                block = self._update_sha_anchor(block, new_reg.sha16)
             return block
 
         elif ct == ChangeType.ACCESS_CHANGED:
             return self._regen_access_template(block, cr)
 
         elif ct == ChangeType.OFFSET_CHANGED:
-            # Mask bits move with the shift — regenerate full function set.
-            new_f   = cr.new_field
-            new_reg = cr.new_reg
-            if new_f and new_reg:
-                block = self._remove_field_functions(
-                    block, self.ip, cr.reg_name, cr.field_name or ""
-                )
-                new_fns = generate_field_functions(
-                    self.ip, cr.reg_name, new_f, new_reg.offset
-                )
-                self._test_stubs.extend(self._make_test(cr))
-                block = block.rstrip() + "\n\n" + new_fns + "\n"
+            # Struct-based: offset handled by hardware struct — no body change needed.
             if cr.new_reg:
                 block = self._update_sha_anchor(block, cr.new_reg.sha16)
             return block
-
 
         elif ct == ChangeType.RESET_CHANGED:
             if cr.new_reg:
@@ -638,7 +807,8 @@ class LLDPatcher:
             return block
 
         elif ct == ChangeType.FIELD_DELETED:
-            return self._remove_field_functions(
+            # Remove all functions for deleted field
+            return _remove_field_functions_raw(
                 block, self.ip, cr.reg_name, cr.field_name or ""
             )
 
@@ -650,30 +820,37 @@ class LLDPatcher:
             new_reg = cr.new_reg
             if new_f is None or new_reg is None:
                 return block
-            if cr.needs_llm:
-                return self._llm_regenerate(block, cr)
+            # Always generate template functions (guaranteed output regardless of LLM)
             new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
             self._test_stubs.extend(self._make_test(cr))
-            return block.rstrip() + "\n\n" + new_fns + "\n"
+            block = block.rstrip() + "\n\n" + new_fns + "\n"
+            # If LLM available, replace template body with LLM-enhanced version
+            if cr.needs_llm and not self._no_llm and self._llm is not None:
+                block = self._llm_regenerate(block, cr)
+            return block
 
-        return block  # UNCHANGED or unhandled
+        return block
 
-    # ── Public patch API ───────────────────────────────────────────────────
+    # ── Public patch API ─────────────────────────────────────────────────────
     def patch(
         self,
-        lld_path:     str | Path,
-        changes:      List[ChangeRecord],
-        new_ir:       Optional[SfrIR] = None,
-        out_path:     Optional[str | Path] = None,
+        lld_path: str | Path,
+        changes:  List[ChangeRecord],
+        new_ir:   Optional[SfrIR] = None,
+        out_path: Optional[str | Path] = None,
     ) -> str:
         """
         Patch lld.h with the given changes. Returns the updated content.
 
-        Args:
-            lld_path:  Path to existing lld.h
-            changes:   Classified change list from SfrDiffAnalyzer
-            new_ir:    New SfrIR (for REG_ADDED blocks)
-            out_path:  Write output here; defaults to lld_path (in-place)
+        Steps:
+          1. Backup original
+          2. Update / insert LLD_IP_STRUCTS section from new_ir
+          3. Auto-migrate any base[]-style blocks to struct-based
+          4. Apply change records per block
+          5. Append new REG_ADDED blocks
+          6. Mark REG_DELETED blocks as deprecated (do NOT remove)
+          7. Brace-balance check
+          8. Write output
         """
         lld_path = Path(lld_path)
         out_path = Path(out_path) if out_path else lld_path
@@ -682,12 +859,19 @@ class LLDPatcher:
         backup   = lld_path.with_suffix(".h.bak")
         backup.write_text(original, encoding="utf-8")
 
-        self._test_stubs = []
+        self._test_stubs      = []
+        self._deprecated_fns  = []
 
-        # Build lookup: reg_name → list of changes
+        # ── Step 1: Update struct section ──────────────────────────────────
+        content = original
+        if new_ir is not None:
+            struct_text = generate_lld_structs(self.ip, new_ir)
+            content     = _replace_struct_section(content, self.ip, struct_text)
+
+        # ── Step 2: Build per-change lookup ────────────────────────────────
         changes_by_reg: Dict[str, List[ChangeRecord]] = {}
-        reg_deletes: set = set()
-        reg_adds: List[ChangeRecord] = []
+        reg_deletes:    set              = set()
+        reg_adds:       List[ChangeRecord] = []
 
         for cr in changes:
             if cr.change_type == ChangeType.REG_DELETED:
@@ -697,9 +881,8 @@ class LLDPatcher:
             else:
                 changes_by_reg.setdefault(cr.reg_name, []).append(cr)
 
-        # Split lld.h into blocks
-        segments = self._split_blocks(original)
-
+        # ── Step 3: Split + process blocks ─────────────────────────────────
+        segments  = self._split_blocks(content)
         out_parts: List[str] = []
 
         for (reg_name, sha, block) in segments:
@@ -707,30 +890,47 @@ class LLDPatcher:
                 out_parts.append(block)
                 continue
 
-            if reg_name in reg_deletes:
-                print(f"  [DEL] Register block: {reg_name}")
-                continue  # drop the entire block
+            # Auto-migrate base[] → struct-based before applying changes
+            if not _is_struct_based(block) and new_ir and reg_name in new_ir.registers:
+                print(f"  [MIGRATE] {reg_name} — base[] → struct-based")
+                block = _migrate_block_to_struct(
+                    self.ip, block, reg_name, new_ir.registers[reg_name]
+                )
+            elif not _is_struct_based(block) and reg_name in changes_by_reg:
+                # Use old reg info for migration if not in new_ir
+                first_cr = changes_by_reg[reg_name][0]
+                if first_cr.old_reg:
+                    print(f"  [MIGRATE] {reg_name} — base[] → struct-based (old IR)")
+                    block = _migrate_block_to_struct(
+                        self.ip, block, reg_name, first_cr.old_reg
+                    )
 
+            # REG_DELETED: deprecate, don't drop
+            if reg_name in reg_deletes:
+                print(f"  [DEPRECATE] Register block: {reg_name}")
+                block, fn_names = _deprecate_block(block, reg_name)
+                self._deprecated_fns.extend(fn_names)
+                out_parts.append(block)
+                continue
+
+            # Apply field-level changes
             block_changes = changes_by_reg.get(reg_name, [])
-            current = block
+            current       = block
 
             for cr in block_changes:
                 print(f"  [{cr.change_type}] {reg_name}.{cr.field_name or ''}")
                 current = self._apply(current, sha, cr)
 
-            # Update SRC_SHA for any changed block
-            if block_changes and reg_name in (
-                {cr.reg_name for cr in changes_by_reg.get(reg_name, [])}
-            ):
-                if new_ir and reg_name in new_ir.registers:
-                    new_sha = new_ir.registers[reg_name].sha16
-                    current = self._update_sha_anchor(current, new_sha)
+            # Update SHA for any changed block
+            if block_changes and new_ir and reg_name in new_ir.registers:
+                new_sha = new_ir.registers[reg_name].sha16
+                current = self._update_sha_anchor(current, new_sha)
 
             out_parts.append(current)
 
         content = "".join(out_parts)
 
-        # Append entirely new register blocks
+        # ── Step 4: Append entirely new register blocks ─────────────────────
         for cr in reg_adds:
             if new_ir and cr.reg_name in new_ir.registers:
                 reg = new_ir.registers[cr.reg_name]
@@ -740,14 +940,15 @@ class LLDPatcher:
                     [generate_test_for_field(self.ip, cr.reg_name, f, reg.offset)
                      for f in reg.fields.values()]
                 )
-                # Insert before final #endif
                 endif_pos = content.rfind("#endif")
                 if endif_pos != -1:
-                    content = content[:endif_pos] + "\n" + new_block + "\n" + content[endif_pos:]
+                    content = (
+                        content[:endif_pos] + "\n" + new_block + "\n" + content[endif_pos:]
+                    )
                 else:
                     content += "\n" + new_block + "\n"
 
-        # Brace balance check
+        # ── Step 5: Brace-balance check ─────────────────────────────────────
         if not self._check_braces(content):
             backup.replace(lld_path)
             raise RuntimeError(
@@ -773,75 +974,35 @@ class LLDPatcher:
     def get_test_stubs(self) -> List[str]:
         return list(self._test_stubs)
 
-    # ── IRQ helper tests ──────────────────────────────────────────────────
-    @staticmethod
-    def _irq_test_stubs(ip: str, reg_name: str, field: FieldIR, reg_offset: int) -> List[str]:
-        """Generate tests for the 4 IRQ helper functions."""
-        fn_base = f"lld_{ip.lower()}_{reg_name.lower()}_{field.name.lower()}_irq"
-        widx    = _word_idx(reg_offset)
-        mask    = field.mask
-        return [
-            # enable
-            f"static void test_{fn_base}_enable(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {fn_base}_enable(regs);\n"
-            f"    assert((regs[{widx}] & 0x{mask:08X}U) == 0x{mask:08X}U);\n"
-            f"}}",
-            # disable
-            f"static void test_{fn_base}_disable(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    regs[{widx}] = 0xFFFFFFFFU;\n"
-            f"    {fn_base}_disable(regs);\n"
-            f"    assert((regs[{widx}] & 0x{mask:08X}U) == 0U);\n"
-            f"}}",
-            # status
-            f"static void test_{fn_base}_status(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    regs[{widx}] = 0x{mask:08X}U;\n"
-            f"    assert({fn_base}_status(regs) == 0x{mask:08X}U);\n"
-            f"}}",
-            # clear
-            f"static void test_{fn_base}_clear(void) {{\n"
-            f"    volatile uint32_t regs[256] = {{0}};\n"
-            f"    {fn_base}_clear(regs);\n"
-            f"    assert(regs[{widx}] == 0x{mask:08X}U);\n"
-            f"}}",
-        ]
+    def get_deprecated_fns(self) -> List[str]:
+        return list(self._deprecated_fns)
 
+    # ── Test file writer ─────────────────────────────────────────────────────
     def write_test_file(
         self,
         out_path:   str | Path,
         sfr_new:    str,
         lld_new:    str,
-        new_ir=None,        # SfrIR — if provided, tests generated for ALL fields
-        llm_client=None,    # LLMClient — if provided and llm_test_gen=True, use LLM
-        lld_text:   str = "",  # full text of patched lld.h for impl extraction
+        new_ir=None,
+        llm_client=None,
+        lld_text:   str = "",
     ) -> str:
         """
-        Write the auto-generated test file.
+        Write the auto-generated struct-based unit test file.
 
-        Coverage modes:
-          • new_ir provided + llm_client provided
-              → LLM writes rich tests (boundary values, RMW isolation, reset checks)
-                with template fallback per field if LLM fails
-          • new_ir provided, no llm_client
-              → Template tests for EVERY field (100% function coverage)
-          • new_ir=None
-              → Template tests for changed fields only (legacy)
-
-        LLM test generation:
-          - One LLM call per field (cached by reg+field+access+desc key)
-          - Falls back silently to template if LLM unavailable or call fails
-          - Skips LLM for IRQ helpers (always template — they are trivial)
+        Coverage:
+          - new_ir provided → tests for ALL fields (100% coverage)
+          - new_ir=None     → tests for changed fields only (legacy)
+          - llm_client      → LLM writes richer tests; falls back to template
         """
+        import re as _re
         out_path = Path(out_path)
         use_llm  = llm_client is not None and getattr(llm_client, "available", False)
 
-        all_stubs: List[str] = []
+        all_stubs:      List[str] = []
         llm_count = template_count = 0
 
         if new_ir is not None:
-            # ── Full coverage path ───────────────────────────────────────────
             seen: set = set()
             for reg_name in sorted(new_ir.registers):
                 reg = new_ir.registers[reg_name]
@@ -854,10 +1015,9 @@ class LLDPatcher:
 
                     stub = ""
                     if use_llm:
-                        # Build fn_list for prompt
-                        fn_base  = f"lld_{self.ip.lower()}_{reg_name.lower()}_{fname.lower()}"
-                        fns      = []
-                        acc      = fld.access.upper()
+                        fn_base = f"lld_{self.ip.lower()}_{reg_name.lower()}_{fname.lower()}"
+                        fns     = []
+                        acc     = fld.access.upper()
                         if acc in {"RO", "RW", "W1C", "W1S"}:
                             fns.append(f"{fn_base}_get")
                         if acc == "RW":
@@ -868,12 +1028,9 @@ class LLDPatcher:
                             fns.append(f"{fn_base}_clear")
                         if acc == "W1S":
                             fns.append(f"{fn_base}_set1")
-
-                        # Extract reference impl from lld_text
-                        impl = extract_all_functions_for_field(
+                        impl  = extract_all_functions_for_field(
                             lld_text, self.ip, reg_name, fname
                         ) if lld_text else ""
-
                         width = fld.msb - fld.lsb + 1
                         stub  = llm_client.generate_test(
                             ip=self.ip, reg_name=reg_name, reg_offset=reg.offset,
@@ -889,20 +1046,17 @@ class LLDPatcher:
                         all_stubs.append(stub)
                         llm_count += 1
                     else:
-                        # Template fallback
                         tmpl = generate_test_for_field(self.ip, reg_name, fld, reg.offset)
                         if tmpl:
                             all_stubs.append(tmpl)
                         template_count += 1
 
-                    # IRQ helpers — always template (trivial, no LLM needed)
                     if _is_irq_field(fld):
                         all_stubs.extend(
                             self._irq_test_stubs(self.ip, reg_name, fld, reg.offset)
                         )
         else:
-            # ── Partial (legacy) path ────────────────────────────────────────
-            all_stubs    = list(self._test_stubs)
+            all_stubs      = list(self._test_stubs)
             template_count = len(all_stubs)
 
         mode = "ALL fields"
@@ -921,7 +1075,7 @@ class LLDPatcher:
         body   = "\n\n".join(all_stubs)
         runner = "\n\nint main(void) {\n"
         for stub in all_stubs:
-            for m in re.finditer(r"static void (test_\w+)\(void\)", stub):
+            for m in _re.finditer(r"static void (test_\w+)\(void\)", stub):
                 runner += f"    {m.group(1)}();\n"
         runner += "    return 0;\n}\n"
 

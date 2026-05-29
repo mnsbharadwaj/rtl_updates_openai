@@ -48,6 +48,8 @@ _PR_TEMPLATE = """\
 {removed_fns}
 ```
 
+{deprecated_section}
+
 ## Git Diff Stat
 
 ```
@@ -155,14 +157,15 @@ def _make_pr_section(github_url: str, ip: str, branch: str = "") -> str:
 
 
 def build_pr_description(
-    ip:            str,
-    changes:       List[ChangeRecord],
-    compile_result: CompileResult,
-    lld_file:      str | Path,
-    test_file:     str | Path,
-    added_fns:     Optional[List[str]] = None,
-    removed_fns:   Optional[List[str]] = None,
-    github_url:    str = "",
+    ip:              str,
+    changes:         List[ChangeRecord],
+    compile_result:  CompileResult,
+    lld_file:        str | Path,
+    test_file:       str | Path,
+    added_fns:       Optional[List[str]] = None,
+    removed_fns:     Optional[List[str]] = None,
+    deprecated_fns:  Optional[List[str]] = None,
+    github_url:      str = "",
 ) -> str:
     """Build the PR_DESCRIPTION.md content."""
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -202,6 +205,25 @@ def build_pr_description(
     if not checklist_items:
         checklist_items = ["- [x] All functions pass gcc compile check"]
 
+    # Deprecated functions section
+    if deprecated_fns:
+        dep_lines = [
+            "## ⚠ Deprecated LLD Functions (Manual Deletion Required)",
+            "",
+            "The following functions reference SFR registers that were **deleted** in the",
+            "new SFR version. They are kept in the LLD to avoid compilation errors in IP",
+            "emulation files.",
+            "",
+            "**Action required:** Search for callers of these functions, then delete them",
+            "in a follow-up PR once all callers are removed.",
+            "",
+        ]
+        for fn in deprecated_fns:
+            dep_lines.append(f"- `{fn}()`")
+        deprecated_section = "\n".join(dep_lines)
+    else:
+        deprecated_section = ""
+
     diff_stat  = _git_diff_stat(lld_file)
     gh_url     = _get_github_url(github_url)
     pr_section = _make_pr_section(gh_url, ip)
@@ -214,6 +236,7 @@ def build_pr_description(
         test_file=Path(test_file).name,
         added_fns="\n".join(added_fns or ["(none)"]),
         removed_fns="\n".join(removed_fns or ["(none)"]),
+        deprecated_section=deprecated_section,
         diff_stat=diff_stat,
         checklist="\n".join(checklist_items),
         github_pr_section=pr_section,
@@ -221,17 +244,18 @@ def build_pr_description(
 
 
 def stage_pr(
-    ip:            str,
-    changes:       List[ChangeRecord],
-    compile_result: CompileResult,
-    lld_file:      str | Path,
-    test_file:     str | Path,
-    sfr_new:       str | Path,
-    out_dir:       Optional[str | Path] = None,
-    added_fns:     Optional[List[str]] = None,
-    removed_fns:   Optional[List[str]] = None,
-    no_git:        bool = False,
-    github_url:    str = "",
+    ip:              str,
+    changes:         List[ChangeRecord],
+    compile_result:  CompileResult,
+    lld_file:        str | Path,
+    test_file:       str | Path,
+    sfr_new:         str | Path,
+    out_dir:         Optional[str | Path] = None,
+    added_fns:       Optional[List[str]] = None,
+    removed_fns:     Optional[List[str]] = None,
+    deprecated_fns:  Optional[List[str]] = None,
+    no_git:          bool = False,
+    github_url:      str = "",
 ) -> Path:
     """
     Generate PR_DESCRIPTION.md and git add all changed files.
@@ -257,13 +281,13 @@ def stage_pr(
     sfr_new   = Path(sfr_new)
     out_dir   = Path(out_dir) if out_dir else lld_file.parent
 
-    # Resolve GitHub URL: use passed value -> git remote -> empty
     gh_url = _get_github_url(github_url)
 
     pr_desc = build_pr_description(
         ip=ip, changes=changes, compile_result=compile_result,
         lld_file=lld_file, test_file=test_file,
         added_fns=added_fns, removed_fns=removed_fns,
+        deprecated_fns=deprecated_fns,
         github_url=gh_url,
     )
 

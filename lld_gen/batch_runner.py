@@ -149,7 +149,11 @@ class BatchRunner:
 
             parser  = SfrParser(ip=job.ip)
             new_ir  = parser.parse_file(job.new_sfr)
-            llm     = LLMClient(hf_token=hf_token) if not no_llm else LLMClient(hf_token="")
+            ollama_model = str(overrides.get("ollama_model", self.cfg.ollama_model) or "")
+            llm = LLMClient(
+                hf_token     = hf_token,
+                ollama_model = ollama_model,
+            ) if not no_llm else LLMClient(hf_token="", ollama_model="")
             patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
 
             # Patch the COPY in output_dir (not the original)
@@ -200,6 +204,7 @@ class BatchRunner:
                 lld_file=job.out_lld,
                 test_file=test_file,
                 sfr_new=job.new_sfr,
+                deprecated_fns=patcher.get_deprecated_fns(),
                 no_git=no_git,
                 github_url=self.cfg.github_url,
             )

@@ -1,24 +1,24 @@
 """
-llm_client.py — Qwen2.5-Coder-7B Cloud LLM Client
+llm_client.py — Multi-Backend LLM Client (Ollama + HuggingFace)
 
-Calls the HuggingFace Inference API with Qwen2.5-Coder-7B-Instruct
-for AI-assisted LLD function generation.
+Supports two backends:
+  1. Ollama  (local, zero-cost) — auto-detected at http://localhost:11434
+  2. HuggingFace Inference API  — requires HF_TOKEN env var
 
-Environment variables:
-    HF_TOKEN     HuggingFace API token (required for cloud inference)
+Backend priority:
+  ollama_model configured  →  use Ollama
+  HF_TOKEN set             →  use HuggingFace
+  neither                  →  no LLM available
 
-Parameters:
-    max_new_tokens = 512    (token budget per call)
-    temperature    = 0.1    (near-deterministic, reproducible output)
-    do_sample      = False
+All prompts generate struct-based LLD functions:
+  lld->pSFR->stREG.stNative.FIELD = val;
 
 Caching:
-    Responses are cached by SHA-16 key of (reg + field + change_type + desc)
-    in .lld_gen_cache/ to avoid redundant API calls.
+  Responses cached by SHA-16 of (reg|field|change_type|desc) in .lld_gen_cache/
 
-Fallback:
-    If HF_TOKEN is not set or the API is unreachable, the client
-    falls back to template-only generation (no LLM).
+Struct-based system prompt:
+  Instructs LLM to use `struct lld_{ip} *lld` parameter and
+  `lld->pSFR->st{REG}.stNative.{FIELD}` access.
 """
 from __future__ import annotations
 
@@ -31,63 +31,77 @@ from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Prompt template (from SKILL.md / design doc section 6.3.1)
+# LLD function generation system prompt (struct-based)
 # ---------------------------------------------------------------------------
 _SYSTEM_PROMPT = """\
-You are an expert embedded C firmware engineer. Generate ONLY raw C code:
-- No #include directives
-- No #define directives
-- No markdown fences
-- No prose or explanations
-- Exact function signatures per SKILL.md conventions
+You are an expert embedded C firmware engineer for Samsung SFR register drivers.
+Generate ONLY raw C code with these rules:
+- No #include, no #define, no markdown fences, no prose
 - static inline functions only
-- Use volatile uint32_t *base parameter
-- Use base[word_index] for register access (word_index = byte_offset / 4)
+- Parameter: struct lld_{ip} *lld   (replace {ip} with actual IP name, lowercase)
+- Access bitfields via: lld->pSFR->st{REG}.stNative.{FIELD}
+  where st{REG} is the struct member (e.g. stSTATUS_CON) and {FIELD} is the bitfield
+- Getter: return ({return_type})(lld->pSFR->stREG.stNative.FIELD);
+- Setter: lld->pSFR->stREG.stNative.FIELD = val;
+- W1C clear: lld->pSFR->stREG.stNative.FIELD = 1U; /* W1C */
+- W1S set1:  lld->pSFR->stREG.stNative.FIELD = 1U; /* W1S */
+- NO raw masks (0x...), NO bit shifts (>>), NO base[] arrays
+- Function naming: lld_{ip}_{reg}_{field}_{verb}  all lowercase
+- Add /** @brief {desc} */ doxygen comment before each function
 """
 
 _USER_PROMPT_TMPL = """\
-IP: {ip}
-Register: {reg_name} at byte offset 0x{offset:04X}
-Register description: {reg_desc}
-Field: {field_name}  bits [{msb}:{lsb}]  access={access}
+IP: {ip}  (lowercase struct: struct lld_{ip_lo} *lld)
+Register: {reg_name}  struct member: st{reg_name}
+Field: {field_name}  access={access}
 Field description: {desc}
-Bit mask: 0x{mask:08X}  shift: {shift}
 Return type: {return_type}
-Change: {change_type}
-Generate: {functions_needed}
+Change type: {change_type}
 
-Old function text (for reference):
+Required functions:
+{functions_needed}
+
+Access path: lld->pSFR->st{reg_name}.stNative.{field_name}
+
+Old function text (for context/reference — rewrite using struct-based access):
 {old_code}
 
-Generate the updated C function(s) following SKILL.md conventions exactly.
+Generate the updated C static inline function(s) — struct-based, no masks, no shifts.
 """
 
 # ---------------------------------------------------------------------------
-# Prompt template for LLM-generated unit tests
+# Unit test generation system prompt (struct-based)
 # ---------------------------------------------------------------------------
 _TEST_SYSTEM_PROMPT = """\
-You are an expert embedded C firmware test engineer.
-Generate ONLY raw C code -- no prose, no markdown fences, no #include lines.
+You are an expert embedded C firmware test engineer for Samsung SFR drivers.
+Generate ONLY raw C code — no prose, no markdown fences, no #include lines.
 Write static void test functions using:
-  volatile uint32_t regs[256] = {0};   as mock register space
-  assert() for all checks
+  SFR_{IP} sfr = {{0}};
+  struct lld_{ip} lld = {{ .pSFR = &sfr }};
 Rules:
-  - Test boundary values (0, max value in field)
-  - Test read-modify-write isolation (other field bits must be unchanged)
-  - Test reset value if non-zero
-  - Test access constraint (RO fields: no set function; W1C: write-1 clears)
-  - One test function per behaviour; name them test_{fn_name}_{scenario}()
+  - Test via struct member:  sfr.st{REG}.stNative.{FIELD}
+  - Test boundary values (0, max field value)
+  - For RW: set via lld function, assert sfr member equals value
+  - For RO: only getter test
+  - For W1C: call clear(), assert member == 1U
+  - For W1S: call set1(), assert member == 1U
+  - One test function per behaviour: test_{fn_name}_{scenario}()
   - No malloc, no OS calls, no external dependencies
 """
 
 _TEST_USER_PROMPT_TMPL = """\
 IP: {ip}
-Register: {reg_name}  byte offset: 0x{offset:04X}  word index: {widx}
-Field: {field_name}  bits [{msb}:{lsb}]  mask: 0x{mask:08X}  shift: {shift}
-Access: {access}
+Register: {reg_name}  struct member: st{reg_name}
+Field: {field_name}  access={access}  width={width} bits
 Description: {desc}
-Reset value of field: 0x{reset_val:X}
-Max value in field: 0x{max_val:X}  ({width}-bit field)
+Reset value: 0x{reset_val:X}
+Max value: 0x{max_val:X}
+
+Test access pattern:
+  SFR_{IP} sfr = {{{{0}}}};
+  struct lld_{ip} lld = {{ .pSFR = &sfr }};
+  sfr.st{reg_name}.stNative.{field_name} = VALUE;  // inject value
+  assert(lld_{ip}_{reg_lo}_{field_lo}_get(&lld) == VALUE);  // getter
 
 Functions to test:
 {fn_list}
@@ -96,12 +110,11 @@ Reference implementation:
 {impl}
 
 Write thorough C unit tests covering:
-1. Normal get/set with value=1 and value=max
-2. RMW isolation: set field to 0 while register starts at 0xFFFFFFFF; verify other bits preserved
-3. Reset value check (if non-zero)
-4. Access constraint (if RO: getter works; setter must NOT exist; if W1C: clear writes 1-to-clear)
+1. get: inject 1U into sfr field, assert getter returns 1U
+2. set (RW): call setter with 1U, assert sfr field == 1U
+3. clear (W1C): call clear(), assert sfr field == 1U
+4. boundary: test with max field value
 """
-
 
 _CACHE_DIR = Path(".lld_gen_cache")
 
@@ -118,42 +131,89 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+# ---------------------------------------------------------------------------
+# LLM Client (Ollama + HuggingFace)
+# ---------------------------------------------------------------------------
 class LLMClient:
     """
-    Qwen2.5-Coder-7B via HuggingFace Inference API.
+    Multi-backend LLM client.
 
-    Falls back gracefully to None if HF_TOKEN is not available.
-    Use `available` property to check before calling `generate()`.
+    Priority:
+      1. Ollama (local) — if ollama_model is set and server is reachable
+      2. HuggingFace   — if HF_TOKEN is set
+      3. No LLM        — available=False
+
+    All generated functions use struct lld_*lld parameter (struct-based LLD).
     """
 
-    HF_API_URL = (
+    OLLAMA_BASE      = "http://localhost:11434"
+    OLLAMA_CHAT_URL  = f"{OLLAMA_BASE}/api/chat"
+    HF_API_URL       = (
         "https://api-inference.huggingface.co/models/"
         "Qwen/Qwen2.5-Coder-7B-Instruct"
     )
 
     def __init__(
         self,
-        hf_token: Optional[str] = None,
-        cache_dir: Optional[Path] = None,
-        max_retries: int = 3,
-        timeout: float = 60.0,
+        hf_token:     Optional[str]  = None,
+        ollama_model: Optional[str]  = None,
+        cache_dir:    Optional[Path] = None,
+        max_retries:  int   = 3,
+        timeout:      float = 120.0,
     ):
-        self._token      = hf_token or os.environ.get("HF_TOKEN", "")
-        self._cache_dir  = Path(cache_dir) if cache_dir else _CACHE_DIR
+        self._hf_token    = hf_token or os.environ.get("HF_TOKEN", "")
+        self._ollama_model = ollama_model or os.environ.get("OLLAMA_MODEL", "")
+        self._cache_dir   = Path(cache_dir) if cache_dir else _CACHE_DIR
         self._cache_dir.mkdir(exist_ok=True)
-        self.max_retries = max_retries
-        self.timeout     = timeout
+        self.max_retries  = max_retries
+        self.timeout      = timeout
+        self._backend     = "none"
 
-        # Import requests lazily — not bundled in all envs
         try:
             import requests as _req
             self._requests = _req
         except ImportError:
             self._requests = None
 
+        # Auto-detect backend
+        self._detect_backend()
+
+    def _detect_backend(self) -> None:
+        """Probe Ollama then HuggingFace to determine which backend is live."""
+        if self._ollama_model and self._requests:
+            try:
+                r = self._requests.get(
+                    f"{self.OLLAMA_BASE}/api/tags", timeout=3
+                )
+                if r.status_code == 200:
+                    models = [m["name"] for m in r.json().get("models", [])]
+                    # Accept partial match (e.g. "qwen2.5-coder" matches "qwen2.5-coder:1.5b")
+                    matched = next(
+                        (m for m in models if m.startswith(self._ollama_model.split(":")[0])),
+                        None
+                    )
+                    if matched:
+                        self._ollama_model = matched   # use exact tag
+                        self._backend = "ollama"
+                        print(f"[LLM] Backend: Ollama ({matched})")
+                        return
+                    else:
+                        print(f"[LLM] Ollama running but model '{self._ollama_model}' not found."
+                              f" Available: {models}")
+            except Exception as e:
+                print(f"[LLM] Ollama probe failed: {e}")
+
+        if self._hf_token and self._requests:
+            self._backend = "huggingface"
+            print(f"[LLM] Backend: HuggingFace (Qwen2.5-Coder-7B)")
+
     @property
     def available(self) -> bool:
-        return bool(self._token) and self._requests is not None
+        return self._backend in {"ollama", "huggingface"}
+
+    @property
+    def backend(self) -> str:
+        return self._backend
 
     # ── Cache ────────────────────────────────────────────────────────────────
     def _cache_path(self, key: str) -> Path:
@@ -166,40 +226,65 @@ class LLMClient:
     def _to_cache(self, key: str, content: str) -> None:
         self._cache_path(key).write_text(content, encoding="utf-8")
 
-    # ── Core HTTP call ───────────────────────────────────────────────────────
-    def _call_api(self, user_msg: str) -> str:
+    # ── Ollama backend ───────────────────────────────────────────────────────
+    def _call_ollama(self, system: str, user: str, max_tokens: int = 512) -> str:
         if not self._requests:
-            raise RuntimeError("requests package not available. Run: pip install requests")
-        if not self._token:
-            raise RuntimeError("HF_TOKEN not set. Export HF_TOKEN=hf_xxxx")
-
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type":  "application/json",
-        }
-        # HuggingFace Inference API chat-completion format
+            raise RuntimeError("requests package not available")
         payload = {
-            "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "model": self._ollama_model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
             ],
-            "max_new_tokens": 512,
-            "temperature":    0.1,
-            "do_sample":      False,
+            "stream": False,
+            "options": {
+                "temperature":  0.1,
+                "num_predict":  max_tokens,
+            },
         }
-
         for attempt in range(self.max_retries):
             try:
                 resp = self._requests.post(
-                    self.HF_API_URL,
-                    headers=headers,
-                    json=payload,
+                    self.OLLAMA_CHAT_URL, json=payload, timeout=self.timeout
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("message", {}).get("content", "")
+            except Exception as exc:
+                if attempt < self.max_retries - 1:
+                    wait = 2 ** attempt
+                    print(f"[LLM-Ollama] Retry {attempt+1}/{self.max_retries} in {wait}s ({exc})")
+                    time.sleep(wait)
+                else:
+                    raise RuntimeError(f"Ollama call failed: {exc}") from exc
+        return ""
+
+    # ── HuggingFace backend ──────────────────────────────────────────────────
+    def _call_hf(self, system: str, user: str, max_tokens: int = 512) -> str:
+        if not self._requests or not self._hf_token:
+            raise RuntimeError("HuggingFace: requests or HF_TOKEN missing")
+        headers = {
+            "Authorization": f"Bearer {self._hf_token}",
+            "Content-Type":  "application/json",
+        }
+        payload = {
+            "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            "max_new_tokens": max_tokens,
+            "temperature":    0.1,
+            "do_sample":      False,
+        }
+        for attempt in range(self.max_retries):
+            try:
+                resp = self._requests.post(
+                    self.HF_API_URL, headers=headers, json=payload,
                     timeout=self.timeout,
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                # HF inference API returns generated_text or choices
                 if isinstance(data, list) and data:
                     return data[0].get("generated_text", "")
                 if isinstance(data, dict):
@@ -211,15 +296,22 @@ class LLMClient:
             except Exception as exc:
                 if attempt < self.max_retries - 1:
                     wait = 2 ** attempt
-                    print(f"[LLM] Retry {attempt + 1}/{self.max_retries} in {wait}s ({exc})")
+                    print(f"[LLM-HF] Retry {attempt+1}/{self.max_retries} in {wait}s ({exc})")
                     time.sleep(wait)
                 else:
-                    raise RuntimeError(
-                        f"LLM call failed after {self.max_retries} retries: {exc}"
-                    ) from exc
+                    raise RuntimeError(f"HF call failed: {exc}") from exc
         return ""
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # ── Dispatch ─────────────────────────────────────────────────────────────
+    def _call(self, system: str, user: str, max_tokens: int = 512) -> str:
+        if self._backend == "ollama":
+            return self._call_ollama(system, user, max_tokens)
+        elif self._backend == "huggingface":
+            return self._call_hf(system, user, max_tokens)
+        else:
+            raise RuntimeError("No LLM backend available")
+
+    # ── Public: LLD function generation ─────────────────────────────────────
     def generate(
         self,
         ip:          str,
@@ -239,10 +331,9 @@ class LLMClient:
         functions_needed: str = "",
     ) -> str:
         """
-        Generate LLD C functions for one field change.
-
-        Returns raw C source string (no fences, no includes).
-        Raises RuntimeError if LLM is not available and no cache hit.
+        Generate struct-based LLD C functions for one field change.
+        Returns raw C source string.
+        Raises RuntimeError if LLM is unavailable and no cache hit.
         """
         key    = _cache_key(reg_name, field_name, change_type, desc)
         cached = self._from_cache(key)
@@ -252,61 +343,65 @@ class LLMClient:
 
         if not self.available:
             raise RuntimeError(
-                f"LLM not available (HF_TOKEN missing or requests not installed). "
-                f"Cannot generate code for {reg_name}.{field_name} ({change_type}). "
-                f"Set HF_TOKEN env var or use --no-llm."
+                f"LLM not available. Set OLLAMA_MODEL or HF_TOKEN. "
+                f"Field: {reg_name}.{field_name} ({change_type})"
             )
 
-        print(f"[LLM] Generating: {reg_name}.{field_name} ({change_type}) …")
+        ip_lo   = ip.lower()
+        reg_lo  = reg_name.lower()
+        field_lo = field_name.lower()
+
         if not functions_needed:
-            fn_prefix = f"{ip}_{reg_name}_{field_name}"
+            fn_prefix = f"lld_{ip_lo}_{reg_lo}_{field_lo}"
             fns = []
             if access in {"RO", "RW", "W1C", "W1S"}:
                 fns.append(f"{fn_prefix}_get")
-            if access in {"RW"}:
+            if access == "RW":
                 fns.append(f"{fn_prefix}_set")
-            if access in {"WO"}:
+            if access == "WO":
                 fns.append(f"{fn_prefix}_set")
-            if access in {"W1C"}:
+            if access == "W1C":
                 fns.append(f"{fn_prefix}_clear")
-            if access in {"W1S"}:
+            if access == "W1S":
                 fns.append(f"{fn_prefix}_set1")
-            functions_needed = ", ".join(fns) or f"{fn_prefix}_get"
+            functions_needed = "\n".join(f"  - {f}" for f in fns) or f"  - {fn_prefix}_get"
 
-        user_msg = _USER_PROMPT_TMPL.format(
-            ip=ip, reg_name=reg_name, offset=reg_offset, reg_desc=reg_desc or "",
-            field_name=field_name, msb=msb, lsb=lsb, access=access,
-            desc=desc, mask=mask, shift=shift, return_type=return_type,
-            change_type=change_type, old_code=old_code or "(none)",
+        # Build struct-based system prompt substituting IP name
+        system = _SYSTEM_PROMPT.replace("{ip}", ip_lo).replace("{return_type}", return_type)
+
+        user = _USER_PROMPT_TMPL.format(
+            ip=ip, ip_lo=ip_lo,
+            reg_name=reg_name, field_name=field_name,
+            access=access, desc=desc, return_type=return_type,
+            change_type=change_type,
+            old_code=old_code or "(none — generate fresh)",
             functions_needed=functions_needed,
         )
 
-        code = _strip_fences(self._call_api(user_msg))
-        self._to_cache(key, code)
+        print(f"[LLM-{self._backend.upper()}] Generating: {reg_name}.{field_name} ({change_type}) …")
+        code = _strip_fences(self._call(system, user, max_tokens=600))
+        if code:
+            self._to_cache(key, code)
         return code
 
+    # ── Public: compile-error fix ────────────────────────────────────────────
     def fix_compile_error(
         self,
         broken_code: str,
         error_msg:   str,
         context:     str = "",
     ) -> str:
-        """
-        Re-prompt the LLM with the broken function text and gcc error output
-        to get a fixed version.
-        """
-        print(f"[LLM] Requesting compile-error fix …")
-        user_msg = (
-            f"The following C code failed gcc compilation:\n\n"
-            f"```c\n{broken_code}\n```\n\n"
-            f"GCC error:\n```\n{error_msg}\n```\n\n"
-            f"{context}\n\n"
-            f"Provide the corrected function(s) as raw C only."
-        )
         if not self.available:
             raise RuntimeError("LLM not available for compile-error fix.")
-        return _strip_fences(self._call_api(user_msg))
+        system = "You are an expert C firmware engineer. Fix the compile error. Return raw C only."
+        user = (
+            f"Broken code:\n```c\n{broken_code}\n```\n\n"
+            f"GCC error:\n```\n{error_msg}\n```\n\n"
+            f"{context}\n\nReturn the fixed C function(s) only."
+        )
+        return _strip_fences(self._call(system, user, max_tokens=512))
 
+    # ── Public: unit test generation ─────────────────────────────────────────
     def generate_test(
         self,
         ip:          str,
@@ -321,16 +416,12 @@ class LLMClient:
         shift:       int,
         width:       int,
         reset_val:   int,
-        fn_list:     str,       # comma-separated function names to test
-        impl:        str,       # reference C implementation (from lld.h)
+        fn_list:     str,
+        impl:        str,
     ) -> str:
         """
-        Ask the LLM to write rich unit tests for one LLD field.
-
-        Returns raw C source (static void test_*() functions, no includes).
-        Returns empty string if LLM is not available -- caller falls back to template.
-
-        Test cache key is based on reg+field+access+desc so stable across runs.
+        Generate rich struct-based unit tests for one LLD field.
+        Returns empty string if LLM unavailable — caller uses template fallback.
         """
         key    = _cache_key(reg_name, field_name, f"TEST_{access}", desc)
         cached = self._from_cache(key)
@@ -339,57 +430,30 @@ class LLMClient:
             return cached
 
         if not self.available:
-            return ""   # caller will use template fallback
+            return ""  # caller uses template fallback
 
-        widx    = reg_offset // 4
-        max_val = (1 << width) - 1
+        ip_lo    = ip.lower()
+        reg_lo   = reg_name.lower()
+        field_lo = field_name.lower()
+        max_val  = (1 << width) - 1
 
-        user_msg = _TEST_USER_PROMPT_TMPL.format(
-            ip=ip, reg_name=reg_name, offset=reg_offset, widx=widx,
-            field_name=field_name, msb=msb, lsb=lsb,
-            mask=mask, shift=shift, access=access, desc=desc,
-            reset_val=reset_val, max_val=max_val, width=width,
-            fn_list=fn_list, impl=impl or "(not available)",
+        system = _TEST_SYSTEM_PROMPT
+        user   = _TEST_USER_PROMPT_TMPL.format(
+            ip=ip, IP=ip.upper(), ip_lo=ip_lo,
+            reg_name=reg_name, reg_lo=reg_lo,
+            field_name=field_name, field_lo=field_lo,
+            access=access, desc=desc, width=width,
+            reset_val=reset_val, max_val=max_val,
+            fn_list=fn_list,
+            impl=impl or "(not available — generate from description)",
         )
 
-        print(f"[LLM-TEST] Generating tests: {reg_name}.{field_name} ({access}) …")
+        print(f"[LLM-TEST-{self._backend.upper()}] Generating tests: {reg_name}.{field_name} ({access}) …")
         try:
-            # Use the test-specific system prompt
-            headers = {
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type":  "application/json",
-            }
-            payload = {
-                "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
-                "messages": [
-                    {"role": "system", "content": _TEST_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_msg},
-                ],
-                "max_new_tokens": 768,
-                "temperature":    0.15,
-                "do_sample":      False,
-            }
-            resp = self._requests.post(
-                self.HF_API_URL, headers=headers, json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list) and data:
-                code = data[0].get("generated_text", "")
-            elif isinstance(data, dict):
-                choices = data.get("choices", [])
-                code = choices[0].get("message", {}).get("content", "") if choices \
-                       else data.get("generated_text", "")
-            else:
-                code = str(data)
-
-            code = _strip_fences(code)
+            code = _strip_fences(self._call(system, user, max_tokens=768))
             if code:
                 self._to_cache(key, code)
             return code
-
         except Exception as exc:
-            print(f"[LLM-TEST] Failed for {reg_name}.{field_name}: {exc} -- using template")
+            print(f"[LLM-TEST] Failed: {exc} — using template")
             return ""
-

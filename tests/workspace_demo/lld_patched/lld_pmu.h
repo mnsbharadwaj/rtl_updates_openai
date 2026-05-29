@@ -9,63 +9,72 @@
 #include <stdint.h>
 #include "sfr_pmu.h"
 
+/* === BEGIN LLD_PMU_STRUCTS === */
+/* SFR Aggregate Struct (auto-generated from new SFR — DO NOT EDIT) */
+typedef volatile struct _SFR_PMU_S
+{
+    SFR_PMU_PMU_CTRL                     stPMU_CTRL;  /* offset 0x0000 */
+    SFR_PMU_STATUS_CON                   stSTATUS_CON;  /* offset 0x0004 */
+    SFR_PMU_CLK_CON                      stCLK_CON;  /* offset 0x0008 */
+    SFR_PMU_RST_CON                      stRST_CON;  /* offset 0x000C */
+    SFR_PMU_IRQ_CON                      stIRQ_CON;  /* offset 0x0010 */
+} SFR_PMU, *pSFR_PMU;
+
+/* LLD Driver Struct */
+struct lld_pmu {
+    pSFR_PMU pSFR;  /* pointer to hardware register block */
+};
+/* === END LLD_PMU_STRUCTS === */
+
+
 /* === BEGIN LLD_PMU === */
 
 /* ═══════════════════════════════════════════════════════════════
  * REGISTER: PMU_CTRL                        offset=0x0000
  * 
- * SRC_SHA: 5a19a6061a49342e
+ * SRC_SHA: c411f6f310bfb360
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief DMA enable */
-static inline uint8_t lld_pmu_pmu_ctrl_dma_en_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_dma_en_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[0] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.DMA_EN);
 }
 
 /** @brief DMA enable */
-static inline void lld_pmu_pmu_ctrl_dma_en_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_dma_en_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00000001U;
-    r |= ((uint32_t)val << 0U) & 0x00000001U;
-    base[0] = r;
+    lld->pSFR->stPMU_CTRL.stNative.DMA_EN = val;
 }
 
 /** @brief DMA pass status */
-static inline uint8_t lld_pmu_pmu_ctrl_dma_pass_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_dma_pass_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[0] & 0x00000002U) >> 1U);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.DMA_PASS);
 }
 
 /** @brief HCPU reset control */
-static inline uint8_t lld_pmu_pmu_ctrl_hcpu_rst_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_hcpu_rst_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[0] & 0x00000004U) >> 2U);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.HCPU_RST);
 }
 
 /** @brief HCPU reset control */
-static inline void lld_pmu_pmu_ctrl_hcpu_rst_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_hcpu_rst_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00000004U;
-    r |= ((uint32_t)val << 2U) & 0x00000004U;
-    base[0] = r;
+    lld->pSFR->stPMU_CTRL.stNative.HCPU_RST = val;
 }
 
 /** @brief HCPU vector init */
-static inline uint8_t lld_pmu_pmu_ctrl_hcpu_vinit_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_pmu_con_hcpu_vinit_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[0] & 0x00000008U) >> 3U);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.HCPU_VINIT);
 }
 
 /** @brief HCPU vector init */
-static inline void lld_pmu_pmu_ctrl_hcpu_vinit_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_pmu_con_hcpu_vinit_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[0];
-    r &= ~0x00000008U;
-    r |= ((uint32_t)val << 3U) & 0x00000008U;
-    base[0] = r;
+    lld->pSFR->stPMU_CTRL.stNative.HCPU_VINIT = val;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -75,75 +84,51 @@ static inline void lld_pmu_pmu_ctrl_hcpu_vinit_set(volatile uint32_t *base, uint
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief DMA done flag */
-static inline uint8_t lld_pmu_status_con_complete_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_done_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[1] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.COMPLETE);
 }
 
 /** @brief DMA done flag */
-static inline void lld_pmu_status_con_complete_clear(volatile uint32_t *base)
+static inline void lld_pmu_status_con_done_clear(struct lld_pmu *lld)
 {
-    base[1] = 0x00000001U; /* W1C: write 1 to clear */
-}
-
-/** @brief DMA abort status */
-static inline uint8_t lld_pmu_status_con_abort_get(volatile uint32_t *base)
-{
-    return (uint8_t)((base[1] & 0x00000200U) >> 9U);
-}
-
-/** @brief DMA abort status */
-static inline void lld_pmu_status_con_abort_set(volatile uint32_t *base, uint32_t val)
-{
-    uint32_t r = base[1];
-    r &= ~0x00000200U;
-    r |= ((uint32_t)val << 9U) & 0x00000200U;
-    base[1] = r;
+    lld->pSFR->stSTATUS_CON.stNative.COMPLETE = 1U; /* W1C: write 1 to clear */
 }
 
 /** @brief DMA error flag */
-static inline uint8_t lld_pmu_status_con_err_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_status_con_err_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[1] & 0x00000004U) >> 2U);
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.ERR);
+}
+
+/** @brief FIFO level indicator */
+static inline uint8_t lld_pmu_status_con_level_get(struct lld_pmu *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.LEVEL);
+}
+
+/** @brief FIFO level indicator */
+static inline void lld_pmu_status_con_level_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stSTATUS_CON.stNative.LEVEL = val;
+}
+
+/** @brief Threshold level 4-bit */
+static inline uint8_t lld_pmu_status_con_thresh_get(struct lld_pmu *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.THRESH);
+}
+
+/** @brief Threshold level 4-bit */
+static inline void lld_pmu_status_con_thresh_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stSTATUS_CON.stNative.THRESH = val;
 }
 
 /** @brief DMA error flag */
-static inline void lld_pmu_status_con_err_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_status_con_err_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[1];
-    r &= ~0x00000004U;
-    r |= ((uint32_t)val << 2U) & 0x00000004U;
-    base[1] = r;
-}
-
-/** @brief FIFO level indicator */
-static inline uint8_t lld_pmu_status_con_level_get(volatile uint32_t *base)
-{
-    return (uint8_t)((base[1] & 0x00000600U) >> 9U);
-}
-
-/** @brief FIFO level indicator */
-static inline void lld_pmu_status_con_level_set(volatile uint32_t *base, uint32_t val)
-{
-    uint32_t r = base[1];
-    r &= ~0x00000600U;
-    r |= ((uint32_t)val << 9U) & 0x00000600U;
-    base[1] = r;
-}
-
-/** @brief Threshold level 4-bit */
-static inline uint8_t lld_pmu_status_con_thresh_get(volatile uint32_t *base)
-{
-    return (uint8_t)((base[1] & 0x000000F8U) >> 3U);
-}
-
-/** @brief Threshold level 4-bit */
-static inline void lld_pmu_status_con_thresh_set(volatile uint32_t *base, uint32_t val)
-{
-    uint32_t r = base[1];
-    r &= ~0x000000F8U;
-    r |= ((uint32_t)val << 3U) & 0x000000F8U;
-    base[1] = r;
+    lld->pSFR->stSTATUS_CON.stNative.ERR = val;
 }
 /* ═══════════════════════════════════════════════════════════════
  * REGISTER: CLK_CON                        offset=0x0008
@@ -152,55 +137,82 @@ static inline void lld_pmu_status_con_thresh_set(volatile uint32_t *base, uint32
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Clock divider ratio */
-static inline uint8_t lld_pmu_clk_con_clk_div_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_div_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[2] & 0x0000001EU) >> 1U);
+    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_DIV);
 }
 
 /** @brief Clock divider ratio */
-static inline void lld_pmu_clk_con_clk_div_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_div_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[2];
-    r &= ~0x0000001EU;
-    r |= ((uint32_t)val << 1U) & 0x0000001EU;
-    base[2] = r;
+    lld->pSFR->stCLK_CON.stNative.CLK_DIV = val;
 }
 
 /** @brief Clock enable signal */
-static inline uint8_t lld_pmu_clk_con_clk_en_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_en_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[2] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_EN);
 }
 
 /** @brief Clock enable signal */
-static inline void lld_pmu_clk_con_clk_en_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_clk_con_clk_en_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[2];
-    r &= ~0x00000001U;
-    r |= ((uint32_t)val << 0U) & 0x00000001U;
-    base[2] = r;
+    lld->pSFR->stCLK_CON.stNative.CLK_EN = val;
+}
+
+/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
+static inline uint8_t lld_pmu_clk_con_clk_sel_get(struct lld_pmu *lld)
+{
+    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_SEL);
+}
+
+/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
+static inline void lld_pmu_clk_con_clk_sel_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stCLK_CON.stNative.CLK_SEL = val;
 }
 
 /** @brief Power gate status (read-only in v2) */
-static inline uint8_t lld_pmu_clk_con_clk_gate_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_clk_con_clk_gate_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[2] & 0x00000080U) >> 7U);
+    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_GATE);
 }
 
-/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
-static inline uint8_t lld_pmu_clk_con_clk_sel_get(volatile uint32_t *base)
+/* ⚠ DEPRECATED: SFR register SWT_CON was DELETED in the new SFR version.
+ * The functions below are no longer backed by hardware registers.
+ * They are kept here to avoid compilation errors in IP emulation files.
+ * Review the callers and MANUALLY DELETE these functions in a follow-up PR.
+ * See PR_DESCRIPTION.md for the full list. */
+/* ═══════════════════════════════════════════════════════════════
+ * REGISTER: SWT_CON                        offset=0x000C
+ * 
+ * SRC_SHA: 8eab0d8c3aa15c13
+ * ═══════════════════════════════════════════════════════════════ */
+
+/** @brief Software timer reload value */
+static inline uint16_t lld_pmu_swt_con_scall_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[2] & 0x00000060U) >> 5U);
+    return (uint16_t)(lld->pSFR->stSWT_CON.stNative.SCALL);
 }
 
-/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
-static inline void lld_pmu_clk_con_clk_sel_set(volatile uint32_t *base, uint32_t val)
+/** @brief Software timer reload value */
+static inline void lld_pmu_swt_con_scall_set(struct lld_pmu *lld, uint16_t val)
 {
-    uint32_t r = base[2];
-    r &= ~0x00000060U;
-    r |= ((uint32_t)val << 5U) & 0x00000060U;
-    base[2] = r;
+    lld->pSFR->stSWT_CON.stNative.SCALL = val;
 }
+
+/** @brief Software timer prescaler */
+static inline uint16_t lld_pmu_swt_con_scpre_get(struct lld_pmu *lld)
+{
+    return (uint16_t)(lld->pSFR->stSWT_CON.stNative.SCPRE);
+}
+
+/** @brief Software timer prescaler */
+static inline void lld_pmu_swt_con_scpre_set(struct lld_pmu *lld, uint16_t val)
+{
+    lld->pSFR->stSWT_CON.stNative.SCPRE = val;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * REGISTER: RST_CON                        offset=0x0010
  * 
@@ -208,18 +220,15 @@ static inline void lld_pmu_clk_con_clk_sel_set(volatile uint32_t *base, uint32_t
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief Retention control register */
-static inline uint32_t lld_pmu_rst_con_ret_con_get(volatile uint32_t *base)
+static inline uint32_t lld_pmu_rst_con_ret_con_get(struct lld_pmu *lld)
 {
-    return (uint32_t)((base[4] & 0xFFFFFFFFU) >> 0U);
+    return (uint32_t)(lld->pSFR->stRST_CON.stNative.RET_CON);
 }
 
 /** @brief Retention control register */
-static inline void lld_pmu_rst_con_ret_con_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_rst_con_ret_con_set(struct lld_pmu *lld, uint32_t val)
 {
-    uint32_t r = base[4];
-    r &= ~0xFFFFFFFFU;
-    r |= ((uint32_t)val << 0U) & 0xFFFFFFFFU;
-    base[4] = r;
+    lld->pSFR->stRST_CON.stNative.RET_CON = val;
 }
 
 /* === END LLD_PMU === */
@@ -232,60 +241,54 @@ static inline void lld_pmu_rst_con_ret_con_set(volatile uint32_t *base, uint32_t
  * ═══════════════════════════════════════════════════════════════ */
 
 /** @brief IRQ enable */
-static inline uint8_t lld_pmu_irq_con_irq_en_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_irq_con_irq_en_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[4] & 0x00000001U) >> 0U);
+    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_EN);
 }
 
 /** @brief IRQ enable */
-static inline void lld_pmu_irq_con_irq_en_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_irq_con_irq_en_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[4];
-    r &= ~0x00000001U;
-    r |= ((uint32_t)val << 0U) & 0x00000001U;
-    base[4] = r;
+    lld->pSFR->stIRQ_CON.stNative.IRQ_EN = val;
 }
 
-static inline void lld_pmu_irq_con_irq_en_irq_enable(volatile uint32_t *base)  { base[4] |=  0x00000001U; }
-static inline void lld_pmu_irq_con_irq_en_irq_disable(volatile uint32_t *base) { base[4] &= ~0x00000001U; }
-static inline uint32_t lld_pmu_irq_con_irq_en_irq_status(volatile uint32_t *base) { return (base[4] & 0x00000001U); }
-static inline void lld_pmu_irq_con_irq_en_irq_clear(volatile uint32_t *base)   { base[4] = 0x00000001U; }
+static inline void lld_pmu_irq_con_irq_en_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 1U; }
+static inline void lld_pmu_irq_con_irq_en_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 0U; }
+static inline uint32_t lld_pmu_irq_con_irq_en_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_EN); }
+static inline void lld_pmu_irq_con_irq_en_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 1U; } /* W1C */
 
 /** @brief IRQ mask bits */
-static inline uint8_t lld_pmu_irq_con_irq_mask_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_irq_con_irq_mask_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[4] & 0x0000000CU) >> 2U);
+    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_MASK);
 }
 
 /** @brief IRQ mask bits */
-static inline void lld_pmu_irq_con_irq_mask_set(volatile uint32_t *base, uint32_t val)
+static inline void lld_pmu_irq_con_irq_mask_set(struct lld_pmu *lld, uint8_t val)
 {
-    uint32_t r = base[4];
-    r &= ~0x0000000CU;
-    r |= ((uint32_t)val << 2U) & 0x0000000CU;
-    base[4] = r;
+    lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = val;
 }
 
-static inline void lld_pmu_irq_con_irq_mask_irq_enable(volatile uint32_t *base)  { base[4] |=  0x0000000CU; }
-static inline void lld_pmu_irq_con_irq_mask_irq_disable(volatile uint32_t *base) { base[4] &= ~0x0000000CU; }
-static inline uint32_t lld_pmu_irq_con_irq_mask_irq_status(volatile uint32_t *base) { return (base[4] & 0x0000000CU); }
-static inline void lld_pmu_irq_con_irq_mask_irq_clear(volatile uint32_t *base)   { base[4] = 0x0000000CU; }
+static inline void lld_pmu_irq_con_irq_mask_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 1U; }
+static inline void lld_pmu_irq_con_irq_mask_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 0U; }
+static inline uint32_t lld_pmu_irq_con_irq_mask_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_MASK); }
+static inline void lld_pmu_irq_con_irq_mask_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 1U; } /* W1C */
 
 /** @brief IRQ pending flag */
-static inline uint8_t lld_pmu_irq_con_irq_pend_get(volatile uint32_t *base)
+static inline uint8_t lld_pmu_irq_con_irq_pend_get(struct lld_pmu *lld)
 {
-    return (uint8_t)((base[4] & 0x00000002U) >> 1U);
+    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_PEND);
 }
 
 /** @brief IRQ pending flag */
-static inline void lld_pmu_irq_con_irq_pend_clear(volatile uint32_t *base)
+static inline void lld_pmu_irq_con_irq_pend_clear(struct lld_pmu *lld)
 {
-    base[4] = 0x00000002U; /* W1C: write 1 to clear */
+    lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; /* W1C: write 1 to clear */
 }
 
-static inline void lld_pmu_irq_con_irq_pend_irq_enable(volatile uint32_t *base)  { base[4] |=  0x00000002U; }
-static inline void lld_pmu_irq_con_irq_pend_irq_disable(volatile uint32_t *base) { base[4] &= ~0x00000002U; }
-static inline uint32_t lld_pmu_irq_con_irq_pend_irq_status(volatile uint32_t *base) { return (base[4] & 0x00000002U); }
-static inline void lld_pmu_irq_con_irq_pend_irq_clear(volatile uint32_t *base)   { base[4] = 0x00000002U; }
+static inline void lld_pmu_irq_con_irq_pend_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; }
+static inline void lld_pmu_irq_con_irq_pend_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 0U; }
+static inline uint32_t lld_pmu_irq_con_irq_pend_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_PEND); }
+static inline void lld_pmu_irq_con_irq_pend_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; } /* W1C */
 
 #endif /* LLD_PMU_H */

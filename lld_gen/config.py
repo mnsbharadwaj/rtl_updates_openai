@@ -61,8 +61,9 @@ class PatcherConfig:
     no_git:        bool
     hf_token:      str
     gcc:           Optional[str]
-    github_url:    str               = ""    # e.g. https://github.com/user/repo
+    github_url:    str               = ""     # e.g. https://github.com/user/repo
     llm_test_gen:  bool              = False  # true = use LLM to write richer unit tests
+    ollama_model:  str               = ""     # e.g. "qwen2.5-coder:1.5b" for local Ollama
     ip_overrides:  Dict[str, dict]   = field(default_factory=dict)
     ip_list:       List[str]         = field(default_factory=list)
 
@@ -121,6 +122,7 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         gcc          = data.get("gcc") or None,
         github_url   = str(data.get("github_url",     "") or ""),
         llm_test_gen = bool(data.get("llm_test_gen",  False)),
+        ollama_model = str(data.get("ollama_model",   "") or ""),
         ip_overrides = dict(data.get("ip_overrides") or {}),
         ip_list      = list(data.get("ip_list") or []),
     )

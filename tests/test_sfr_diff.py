@@ -361,7 +361,7 @@ class TestLldPatcher:
             ir.registers[r.name] = r
         return ir
 
-    # T24
+    # T24 — REG_RENAMED: function names are FROZEN; only body (struct member path) updated
     def test_reg_renamed_updates_function_names(self, tmp_path):
         reg = self._make_reg("CTRL", 0x0000, [
             {"name": "EN", "msb": 0, "lsb": 0, "access": "RW", "desc": "Enable"}
@@ -379,10 +379,14 @@ class TestLldPatcher:
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
 
-        assert "lld_dma_control_en_get" in content
-        assert "lld_dma_ctrl_en_get" not in content
+        # Function names FROZEN: old name must still be present
+        assert "lld_dma_ctrl_en_get" in content
+        # Body must use new struct member path stCONTROL
+        assert "->stCONTROL." in content
+        # New-named function must NOT appear (we did not rename)
+        assert "lld_dma_control_en_get" not in content
 
-    # T25
+    # T25 — FIELD_RENAMED: function names FROZEN; only stNative.FIELD ref updated
     def test_field_renamed_scoped_to_block(self, tmp_path):
         reg = self._make_reg("CTRL", 0x0000, [
             {"name": "EN", "msb": 0, "lsb": 0},
@@ -403,9 +407,12 @@ class TestLldPatcher:
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
 
-        assert "lld_dma_ctrl_enable_get" in content
-        assert "lld_dma_ctrl_mode_get" in content   # MODE unchanged
-        assert "lld_dma_ctrl_en_get" not in content
+        # Function name FROZEN: lld_dma_ctrl_en_get stays
+        assert "lld_dma_ctrl_en_get" in content
+        # Body updated: stNative.ENABLE replaces stNative.EN
+        assert ".stNative.ENABLE" in content
+        # MODE getter unchanged
+        assert "lld_dma_ctrl_mode_get" in content
 
     # T26
     def test_bitwidth_changed_updates_return_type(self, tmp_path):
@@ -452,7 +459,7 @@ class TestLldPatcher:
         set_fns = _re.findall(r'\bDMA_STATUS_FLAG_set\s*\(', content)
         assert len(set_fns) == 0, f"_set function should not exist for W1C: {set_fns}"
 
-    # T28
+    # T28 — REG_DELETED: DEPRECATE (keep functions), do NOT remove block
     def test_reg_deleted_removes_block(self, tmp_path):
         reg = self._make_reg("CTRL", 0x0000, [
             {"name": "EN", "msb": 0, "lsb": 0},
@@ -467,7 +474,12 @@ class TestLldPatcher:
         changes  = analyzer.analyze(old_ir, new_ir)
         patcher  = LLDPatcher(ip="DMA", no_llm=True)
         content  = patcher.patch(lld, changes, new_ir=new_ir)
-        assert "lld_dma_ctrl_en_get" not in content
+        # Functions KEPT (deprecated, not deleted) to avoid IP emulation errors
+        assert "lld_dma_ctrl_en_get" in content
+        # DEPRECATED comment added
+        assert "DEPRECATED" in content
+        # patcher collects deprecated function names for PR notes
+        assert "lld_dma_ctrl_en_get" in patcher.get_deprecated_fns()
 
     # T29
     def test_field_deleted_removes_functions(self, tmp_path):
@@ -613,18 +625,22 @@ class TestTestGenerator:
         code = generate_test_for_field("DMA", "CTRL", f, reg_offset=0)
         assert "static void test_" in code
 
-    # T36
+    # T36 — struct init used (not raw register array)
     def test_register_array_mock_used(self):
         f    = self._make_field("RW")
         code = generate_test_for_field("DMA", "CTRL", f, reg_offset=0)
-        assert "volatile uint32_t regs[256]" in code
+        # Struct-based: uses SFR_DMA sfr and struct lld_dma
+        assert "struct lld_dma" in code
+        assert "SFR_DMA" in code
+        assert ".pSFR = &sfr" in code
 
-    # T37
+    # T37 — W1C clear test: writes 1 to field (not raw mask)
     def test_w1c_clear_test_checks_mask_written(self):
         f    = self._make_field("W1C", msb=3, lsb=3)
         code = generate_test_for_field("DMA", "CTRL", f, reg_offset=0)
         assert "clear" in code.lower()
-        assert f"0x{f.mask:08X}U" in code
+        # Struct-based: assert field == 1U (not raw mask check)
+        assert "== 1U" in code
 
 
 # ============================================================================
@@ -670,12 +686,15 @@ class TestTemplateGeneration:
         assert "lld_dma_ctrl_en_clear" in code
         assert "lld_dma_ctrl_en_set" not in code
 
-    # T42
+    # T42 — struct-based: no raw base[N] word offsets in generated code
     def test_word_offset_correct_for_nonzero_register(self):
         f   = self._make_field("RW", 0, 0)
-        # Register at byte offset 0x0010 → word index 4
+        # Register at byte offset 0x0010 — struct handles offset, no base[4] in code
         code = generate_field_functions("DMA", "CTRL", f, reg_offset=0x0010)
-        assert "base[4]" in code
+        # Struct-based approach: no raw word offset arithmetic
+        assert "base[4]" not in code
+        # struct param must be present
+        assert "struct lld_dma" in code
 
     # T43
     def test_return_type_matches_field_width(self):

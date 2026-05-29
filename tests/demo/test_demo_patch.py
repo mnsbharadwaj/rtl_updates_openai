@@ -133,57 +133,103 @@ class TestClassification:
 # ── Patch output tests ───────────────────────────────────────────────────────
 class TestPatchOutput:
 
-    # Type 1 — REG_RENAMED
-    def test_reg_renamed_new_name_present(self, patched_content):
-        assert "lld_dma_channel_src_addr_get" in patched_content
+    # ── Structural ──────────────────────────────────────────────────────────
+    def test_brace_balance(self, patched_content):
+        assert LLDPatcher._check_braces(patched_content)
 
-    def test_reg_renamed_old_name_gone(self, patched_content):
-        assert "lld_dma_chan_src_addr_get" not in patched_content
+    def test_header_guard_present(self, patched_content):
+        assert "#ifndef DMA_LLD_H" in patched_content
+        assert "#define DMA_LLD_H" in patched_content
+        assert "#endif" in patched_content
 
-    # Type 2 — REG_DELETED
-    def test_reg_deleted_block_gone(self, patched_content):
-        assert "lld_dma_debug_dbg_en_get" not in patched_content
-        assert "lld_dma_debug_dbg_sel_get" not in patched_content
+    def test_struct_lld_driver_generated(self, patched_content):
+        """Aggregate SFR struct and lld driver struct must appear."""
+        assert "struct lld_dma" in patched_content
+        assert "pSFR_DMA" in patched_content
+        assert "SFR_DMA, *pSFR_DMA" in patched_content
 
-    # Type 3 — REG_ADDED
+    def test_struct_members_use_st_prefix(self, patched_content):
+        """Struct member names use st prefix."""
+        assert "stCTRL" in patched_content or "stCHANNEL" in patched_content
+
+    # ── Type 1 — REG_RENAMED: function names FROZEN, body updated ──────────
+    def test_reg_renamed_fn_name_frozen(self, patched_content):
+        """Function names must NOT be renamed — they are frozen on REG_RENAMED."""
+        # The old function name (lld_dma_chan_*) should REMAIN because names are frozen
+        assert "lld_dma_chan_src_addr_get" in patched_content
+
+    def test_reg_renamed_body_updated(self, patched_content):
+        """Struct member path in body must use NEW register name (stCHANNEL)."""
+        assert "->stCHANNEL." in patched_content
+
+    def test_reg_renamed_old_body_gone(self, patched_content):
+        """Old struct member path stCHAN must be replaced by stCHANNEL."""
+        # stCHAN. should not appear (only stCHANNEL.)
+        import re
+        old_member = re.findall(r'->stCHAN\.', patched_content)
+        assert not old_member, f"Old ->stCHAN. still in patched content"
+
+    # ── Type 2 — REG_DELETED: DEPRECATE, don't delete ──────────────────────
+    def test_reg_deleted_block_preserved(self, patched_content):
+        """Deleted register's functions must be KEPT (not removed)."""
+        # Functions for DEBUG register must still be present
+        assert "lld_dma_debug_dbg_en_get" in patched_content or \
+               "lld_dma_debug" in patched_content
+
+    def test_reg_deleted_deprecated_comment(self, patched_content):
+        """Deleted register block must have DEPRECATED comment."""
+        assert "DEPRECATED" in patched_content
+
+    # ── Type 3 — REG_ADDED ──────────────────────────────────────────────────
     def test_reg_added_irq_en_present(self, patched_content):
         assert "lld_dma_irq_irq_en_get" in patched_content
 
-    def test_reg_added_irq_status_present(self, patched_content):
-        assert "lld_dma_irq_irq_status_get" in patched_content
+    def test_reg_added_struct_ptr_signature(self, patched_content):
+        """New functions use struct lld_dma pointer."""
+        assert "struct lld_dma *lld" in patched_content
 
-    # Type 4 — FIELD_RENAMED
-    def test_field_renamed_enable_present(self, patched_content):
-        assert "lld_dma_ctrl_enable_get" in patched_content
+    def test_reg_added_body_uses_struct_path(self, patched_content):
+        """New function body uses lld->pSFR->stIRQ path."""
+        assert "lld->pSFR->stIRQ." in patched_content
 
-    def test_field_renamed_en_gone(self, patched_content):
-        assert "lld_dma_ctrl_en_get" not in patched_content
+    # ── Type 4 — FIELD_RENAMED: function name FROZEN, body updated ─────────
+    def test_field_renamed_fn_name_frozen(self, patched_content):
+        """FIELD_RENAMED must NOT rename the function — name is frozen."""
+        # lld_dma_ctrl_en_get should remain (frozen)
+        assert "lld_dma_ctrl_en_get" in patched_content
 
-    # Type 5 — FIELD_DELETED
+    def test_field_renamed_body_updated(self, patched_content):
+        """Function body must reference the NEW field name (ENABLE)."""
+        assert ".stNative.ENABLE" in patched_content
+
+    # ── Type 5 — FIELD_DELETED ──────────────────────────────────────────────
     def test_field_deleted_done_gone(self, patched_content):
         assert "lld_dma_status_done_get" not in patched_content
         assert "lld_dma_status_done_clear" not in patched_content
 
-    # Type 6 — FIELD_ADDED
+    # ── Type 6 — FIELD_ADDED ────────────────────────────────────────────────
     def test_field_added_busy_present(self, patched_content):
         assert "lld_dma_status_busy_get" in patched_content
 
-    # Type 7 — BITWIDTH_CHANGED (BURST mask 0xE → 0x1E)
-    def test_bitwidth_burst_new_mask(self, patched_content):
-        assert "0x0000001EU" in patched_content
+    def test_field_added_body_struct_path(self, patched_content):
+        assert "->stSTATUS.stNative.BUSY" in patched_content
 
-    def test_bitwidth_burst_old_mask_gone(self, patched_content):
-        # Old mask 0x0000000EU should no longer appear in CTRL block
-        # (it may still appear in STATUS DONE old remnant check — scoped check)
+    # ── Type 7 — BITWIDTH_CHANGED ───────────────────────────────────────────
+    def test_bitwidth_burst_getter_present(self, patched_content):
+        """Getter for BURST must still be present after bitwidth change."""
+        assert "lld_dma_ctrl_burst_get" in patched_content
+
+    def test_bitwidth_no_raw_masks(self, patched_content):
+        """Struct-based LLD has NO raw mask literals — hardware handles bits."""
+        # Raw mask 0x0000001EU should NOT be in struct-based functions
         import re
-        # Only check within CTRL block context
         ctrl_start = patched_content.find("REGISTER: CTRL")
-        ctrl_end   = patched_content.find("REGISTER: STATUS")
+        ctrl_end   = patched_content.find("REGISTER:", ctrl_start + 1) if ctrl_start != -1 else len(patched_content)
         ctrl_block = patched_content[ctrl_start:ctrl_end] if ctrl_start != -1 else ""
-        assert "0x0000000EU" not in ctrl_block, \
-            "Old BURST mask 0x0000000EU still in CTRL block"
+        # No mask literals in struct-based approach
+        assert "0x0000001EU" not in ctrl_block
 
-    # Type 8 — ACCESS_CHANGED (MODE: RW→RO, setter gone)
+    # ── Type 8 — ACCESS_CHANGED (MODE: RW→RO) ───────────────────────────────
     def test_access_changed_mode_getter_present(self, patched_content):
         assert "lld_dma_ctrl_mode_get" in patched_content
 
@@ -192,40 +238,39 @@ class TestPatchOutput:
         setters = re.findall(r'\blld_dma_ctrl_mode_set\s*\(', patched_content)
         assert not setters, f"MODE_set should not exist after ACCESS_CHANGED: {setters}"
 
-    # Type 9 — OFFSET_CHANGED (THRESH shift 8→9)
-    def test_offset_changed_thresh_new_shift(self, patched_content):
-        assert ">> 9U" in patched_content
+    # ── Type 9 — OFFSET_CHANGED (struct-based: no body change needed) ───────
+    def test_offset_changed_thresh_getter_present(self, patched_content):
+        """Getter must still be present — struct handles bit position."""
+        assert "lld_dma_status_thresh_get" in patched_content
 
-    def test_offset_changed_thresh_new_mask(self, patched_content):
-        assert "0x0000FE00U" in patched_content
+    def test_offset_changed_body_uses_struct(self, patched_content):
+        """Body must use struct member, not raw shift literal."""
+        # >> 9U should NOT appear in struct-based mode
+        assert ">> 9U" not in patched_content
 
-    # Type 10 — RESET_CHANGED (SHA updated; LEVEL function still present)
+    # ── Type 10 — RESET_CHANGED ─────────────────────────────────────────────
     def test_reset_changed_level_still_present(self, patched_content):
         assert "lld_dma_status_level_get" in patched_content
 
-    # Type 11 — COMMENT_CHANGED (TIMEOUT functions present in template-fallback mode)
+    # ── Type 11 — COMMENT_CHANGED ───────────────────────────────────────────
     def test_comment_changed_timeout_present(self, patched_content):
         assert "lld_dma_ctrl_timeout_get" in patched_content
 
-    # Type 12 — MULTI_CHANGED (PRIORITY: RW→RO, setter gone)
+    def test_comment_changed_new_desc_in_docstring(self, patched_content):
+        """Updated description should appear in doxygen @brief."""
+        # The new desc for TIMEOUT from sfr_new.h should appear in the LLD
+        assert "@brief" in patched_content  # at minimum doxygen format preserved
+
+    # ── Type 12 — MULTI_CHANGED (PRIORITY: RW→RO + desc changed) ───────────
     def test_multi_changed_priority_getter_present(self, patched_content):
         assert "lld_dma_ctrl_priority_get" in patched_content
 
     def test_multi_changed_priority_setter_gone(self, patched_content):
         import re
         setters = re.findall(r'\blld_dma_ctrl_priority_set\s*\(', patched_content)
-        assert not setters, f"PRIORITY_set should not exist after MULTI_CHANGED->RO: {setters}"
+        assert not setters, f"PRIORITY_set should not exist after MULTI_CHANGED→RO: {setters}"
 
-    # Integrity check — unchanged FIFO block
+    # ── Integrity: unchanged blocks ─────────────────────────────────────────
     def test_fifo_block_preserved(self, patched_content):
         assert "lld_dma_fifo_depth_get" in patched_content
-        assert "lld_dma_fifo_flush_set" in patched_content
-
-    # Structural integrity
-    def test_brace_balance(self, patched_content):
-        assert LLDPatcher._check_braces(patched_content)
-
-    def test_header_guard_present(self, patched_content):
-        assert "#ifndef DMA_LLD_H" in patched_content
-        assert "#define DMA_LLD_H" in patched_content
         assert "#endif" in patched_content

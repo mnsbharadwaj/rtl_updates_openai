@@ -15,8 +15,9 @@ tests_dir:   "./tests_generated" # Generated unit test .c files written HERE
 # -----------------------------------------------------------------------
 # LLM settings
 # -----------------------------------------------------------------------
-no_llm:   true       # true = template fallback only (no LLM needed)
-hf_token: ""         # HuggingFace token (or set HF_TOKEN env variable)
+no_llm:       false      # false = use LLM (Ollama or HuggingFace)
+hf_token:     ""         # HuggingFace token (or set HF_TOKEN env variable)
+ollama_model: "qwen2.5-coder"  # local Ollama model (auto-matches qwen2.5-coder:1.5b)
 
 # -----------------------------------------------------------------------
 # Git / PR settings
@@ -25,10 +26,9 @@ no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
 github_url: "https://github.com/mnsbharadwaj/rtl_updates_openai"
 
 # Unit test mode
-# false = fast template tests (mask/shift/RMW checks)  -- default
-# true  = LLM writes richer tests (boundaries, reset, access constraints)
-#         requires: no_llm: false  AND  hf_token set
-llm_test_gen: false
+# false = fast template tests -- default
+# true  = LLM writes richer struct-based tests (boundaries, reset, access constraints)
+llm_test_gen: true
 
 # -----------------------------------------------------------------------
 # Compiler settings
