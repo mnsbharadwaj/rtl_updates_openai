@@ -1,0 +1,43 @@
+REGISTER: STATUS                         offset=0x0004
+ * 
+ * SRC_SHA: 545ef759684a8c9c
+ * ═══════════════════════════════════════════════════════════════ */
+
+/** @brief Error code: 0=none,1=bus_err,2=addr_err,3=timeout. */
+static inline uint8_t lld_dma_status_error_get(struct lld_dma *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.ERROR);
+}
+
+/** @brief Current FIFO fill level in entries. */
+static inline uint8_t lld_dma_status_level_get(struct lld_dma *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.LEVEL);
+}
+
+/** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
+static inline uint8_t lld_dma_status_thresh_get(struct lld_dma *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS.stNative.THRESH);
+}
+
+/** @brief FIFO watermark threshold. Triggers interrupt when level exceeds this. */
+static inline void lld_dma_status_thresh_set(struct lld_dma *lld, uint8_t val)
+{
+    lld->pSFR->stSTATUS.stNative.THRESH = val;
+}
+
+static inline void lld_dma_status_thresh_irq_enable(struct lld_dma *lld)  { lld->pSFR->stSTATUS.stNative.THRESH = 1U; }
+static inline void lld_dma_status_thresh_irq_disable(struct lld_dma *lld) { lld->pSFR->stSTATUS.stNative.THRESH = 0U; }
+static inline uint32_t lld_dma_status_thresh_irq_status(struct lld_dma *lld) { return (uint32_t)(lld->pSFR->stSTATUS.stNative.THRESH); }
+static inline void lld_dma_status_thresh_irq_clear(struct lld_dma *lld)   { lld->pSFR->stSTATUS.stNative.THRESH = 1U; } /* W1C */
+
+
+
+/* ⚠ DEPRECATED: SFR register DEBUG was DELETED in the new SFR version.
+ * The functions below are no longer backed by hardware registers.
+ * They are kept here to avoid compilation errors in IP emulation files.
+ * Review the callers and MANUALLY DELETE these functions in a follow-up PR.
+ * See PR_DESCRIPTION.md for the full list. */
+/* ═══════════════════════════════════════════════════════════════
+ * 

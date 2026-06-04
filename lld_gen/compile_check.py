@@ -42,7 +42,7 @@ _FN_FROM_ERROR_RE = re.compile(
     r"(\w+)\s*:\s*(?:error|warning)",         # clang style
 )
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5   # v3.0: was 3, now 5 per user requirement
 
 
 def _find_gcc() -> Optional[str]:
@@ -220,4 +220,84 @@ def run_compile_check(
     result.stderr       = stderr
     result.needs_review = list(failing_fns)
     print(f"  [COMPILE] Still failing after {MAX_RETRIES} retries. Marked for manual review.")
+    return result
+
+
+def run_compile_check_one_fn(
+    fn_name:     str,
+    lld_file:    "str | Path",
+    sfr_new:     "str | Path",
+    test_file:   "Optional[str | Path]" = None,
+    llm_client   = None,
+    gcc_exe:     Optional[str] = None,
+    max_retries: int = MAX_RETRIES,
+) -> CompileResult:
+    """
+    Per-function compile gate — called immediately after each LLM patch.
+
+    Strategy:
+      1. Run gcc -fsyntax-only on lld_file (with sfr_new included)
+      2. If error references fn_name: retry with LLM fix (up to max_retries)
+      3. If still failing: mark as MANUAL_REVIEW, caller should revert fn
+      4. Return CompileResult (success=True even if error is unrelated to fn_name)
+    """
+    lld_file = Path(lld_file)
+    sfr_new  = Path(sfr_new)
+
+    result = CompileResult(success=False, stdout="", stderr="")
+
+    if gcc_exe is None:
+        gcc_exe = _find_gcc()
+    if gcc_exe is None:
+        result.success      = True
+        result.needs_review = ["<compile_check_unavailable>"]
+        return result
+
+    check_file = Path(test_file) if (test_file and Path(test_file).exists()) else lld_file
+
+    for attempt in range(0, max_retries + 1):
+        retcode, stdout, stderr = _run_gcc(gcc_exe, check_file, sfr_new, lld_file)
+        result.retries_used = attempt
+
+        if retcode == 0:
+            result.success = True
+            result.stdout  = stdout
+            result.stderr  = stderr
+            if attempt > 0:
+                print(f"    [COMPILE-FN] OK after {attempt} fix(es): {fn_name}")
+            return result
+
+        # Check if the error is related to our specific function
+        failing_fns = _extract_failing_fns(stderr)
+        if fn_name not in failing_fns and attempt == 0:
+            # Error is from a different function — not our problem, pass through
+            result.success = True
+            return result
+
+        if attempt >= max_retries or llm_client is None:
+            break
+
+        # LLM fix attempt
+        lld_content = lld_file.read_text(encoding="utf-8")
+        broken_code = extract_function(lld_content, fn_name) or ""
+        if not broken_code:
+            break
+
+        print(f"    [COMPILE-FN] Retry {attempt+1}/{max_retries} LLM fix: {fn_name} …")
+        try:
+            fixed_code = llm_client.fix_compile_error(
+                broken_code=broken_code,
+                error_msg=stderr,
+                context="struct-based lld, no masks, preserve signature exactly",
+            )
+            if fixed_code:
+                _patch_function_in_lld(lld_file, fn_name, fixed_code)
+        except RuntimeError as exc:
+            print(f"    [LLM-ERROR] {exc}")
+            break
+
+    # Still failing after max_retries
+    result.stderr       = stderr
+    result.needs_review = [fn_name]
+    print(f"    [COMPILE-FN] MANUAL_REVIEW: {fn_name} (failed after {max_retries} retries)")
     return result

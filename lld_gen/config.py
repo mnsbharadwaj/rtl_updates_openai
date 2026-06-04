@@ -66,11 +66,142 @@ class PatcherConfig:
     ollama_model:  str               = ""     # e.g. "qwen2.5-coder:1.5b" for local Ollama
     ip_overrides:  Dict[str, dict]   = field(default_factory=dict)
     ip_list:       List[str]         = field(default_factory=list)
+    # v3.0 patching flags
+    max_llm_retries:   int  = 5      # LLM fix retries per function
+    per_fn_compile:    bool = True   # gcc check after every LLM patch
+    skip_reg_added:    bool = True   # flag REG_ADDED for manual review
+    skip_reg_deleted:  bool = True   # flag REG_DELETED for manual review
+    cross_lld_scan:    bool = True   # scan lld_dir for callers of changed fns
+    lld_search_depth:  int  = 3      # cross-LLD scan depth
+    atomic_commits:    bool = True   # one commit per SFR file
+    commit_prefix:     str  = "feat(lld)"  # git commit message prefix
+    emit_enum_defines: bool = False  # generate #define enums for FIELD_ENUM_CHANGED
+
+
+@dataclass
+class RepoSpec:
+    """Configuration for one Git/Bitbucket repository."""
+    url:    str  = ""
+    branch: str  = "main"
+    tag:    str  = ""
+    commit: str  = ""
+    path:   str  = ""    # sub-path inside repo
+    token:  str  = ""    # access token (or set BB_TOKEN env var)
+
+
+@dataclass
+class WorkflowConfig(PatcherConfig):
+    """
+    Full end-to-end workflow configuration.
+    Extends PatcherConfig with:
+      - ipxact:       repo/path for new IP-XACT (.xml) files
+      - lld_repo:     repo holding current SFR_*.h + lld_*.h
+      - pr_target:    where to raise the PR (defaults to lld_repo)
+      - convert_script: path to ipxact→SFR converter script
+    """
+    # IP-XACT source (new register descriptions)
+    ipxact:          RepoSpec = field(default_factory=RepoSpec)
+    # LLD/SFR current code
+    lld_repo:        RepoSpec = field(default_factory=RepoSpec)
+    # PR destination (optional — defaults to lld_repo)
+    pr_target:       RepoSpec = field(default_factory=RepoSpec)
+    # Converter script
+    convert_script:  str = "./convert.py"
+    # PR title prefix
+    pr_title_prefix: str = "feat(lld): SFR auto-patch"
 
 
 # ---------------------------------------------------------------------------
 # Config reader
 # ---------------------------------------------------------------------------
+def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
+    """
+    Parse a workflow_config.yaml and return a WorkflowConfig.
+    This is the v3 full-pipeline config (ipxact + lld_repo + pr_target).
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    data = _parse_yaml(text)
+    base = path.parent
+
+    def _str(key: str, default: str = "") -> str:
+        return str(data.get(key, default) or default)
+
+    def _bool(key: str, default: bool = False) -> bool:
+        v = data.get(key, default)
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+
+    def _int(key: str, default: int = 0) -> int:
+        try:
+            return int(data.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _path(key: str, default: str = ".") -> Path:
+        v = data.get(key, default) or default
+        p = Path(str(v))
+        return p if p.is_absolute() else (base / p).resolve()
+
+    def _repo_spec(key: str) -> RepoSpec:
+        d = data.get(key) or {}
+        if not isinstance(d, dict):
+            return RepoSpec()
+        return RepoSpec(
+            url    = str(d.get("url",    "") or ""),
+            branch = str(d.get("branch", "main") or "main"),
+            tag    = str(d.get("tag",    "") or ""),
+            commit = str(d.get("commit", "") or ""),
+            path   = str(d.get("path",   "") or ""),
+            token  = str(d.get("token",  "") or ""),
+        )
+
+    # Resolve sfr_old/new/lld dirs — in workflow mode they come from checkouts
+    # but can still be specified directly for simple mode
+    sfr_old = _path("sfr_old_dir", "./old_sfr")
+    sfr_new = _path("sfr_new_dir", "./new_sfr")
+    lld_dir  = _path("lld_dir",    "./lld")
+    out_dir  = _path("output_dir", str(lld_dir))
+    tst_dir  = _path("tests_dir",  str(lld_dir))
+
+    return WorkflowConfig(
+        # PatcherConfig fields
+        sfr_old_dir  = sfr_old,
+        sfr_new_dir  = sfr_new,
+        lld_dir      = lld_dir,
+        output_dir   = out_dir,
+        tests_dir    = tst_dir,
+        no_llm       = _bool("no_llm",       False),
+        no_git       = _bool("no_git",        False),
+        hf_token     = _str("hf_token"),
+        gcc          = data.get("gcc") or None,
+        github_url   = _str("github_url"),
+        llm_test_gen = _bool("llm_test_gen",  True),
+        ollama_model = _str("ollama_model"),
+        ip_overrides = dict(data.get("ip_overrides") or {}),
+        ip_list      = list(data.get("ip_filter") or data.get("ip_list") or []),
+        # v3 flags
+        max_llm_retries   = _int("max_llm_retries", 5),
+        per_fn_compile    = _bool("per_fn_compile",  True),
+        skip_reg_added    = _bool("skip_reg_added",  True),
+        skip_reg_deleted  = _bool("skip_reg_deleted", True),
+        cross_lld_scan    = _bool("cross_lld_scan",  True),
+        lld_search_depth  = _int("lld_search_depth", 3),
+        atomic_commits    = _bool("atomic_commits",  True),
+        commit_prefix     = _str("commit_prefix",    "feat(lld)"),
+        emit_enum_defines = _bool("emit_enum_defines", False),
+        # Workflow-specific
+        ipxact          = _repo_spec("ipxact"),
+        lld_repo        = _repo_spec("lld_repo"),
+        pr_target       = _repo_spec("pr_target"),
+        convert_script  = _str("convert_script", "./convert.py"),
+        pr_title_prefix = _str("pr_title_prefix", "feat(lld): SFR auto-patch"),
+    )
+
+
 def load_config(config_path: str | Path) -> PatcherConfig:
     """
     Parse lld_patcher.yaml (or .json) and return a PatcherConfig.

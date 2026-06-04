@@ -38,23 +38,61 @@ from typing import Dict, List, Optional, Tuple
 # Change type constants
 # ---------------------------------------------------------------------------
 class ChangeType:
-    REG_RENAMED      = "REG_RENAMED"
-    REG_DELETED      = "REG_DELETED"
-    REG_ADDED        = "REG_ADDED"
-    FIELD_RENAMED    = "FIELD_RENAMED"
-    FIELD_DELETED    = "FIELD_DELETED"
-    FIELD_ADDED      = "FIELD_ADDED"
-    BITWIDTH_CHANGED = "BITWIDTH_CHANGED"
-    ACCESS_CHANGED   = "ACCESS_CHANGED"
-    OFFSET_CHANGED   = "OFFSET_CHANGED"
-    RESET_CHANGED    = "RESET_CHANGED"
-    COMMENT_CHANGED  = "COMMENT_CHANGED"
-    MULTI_CHANGED    = "MULTI_CHANGED"
-    UNCHANGED        = "UNCHANGED"
+    # ── Register-level (Types 1–3, 15, 19–21) ─────────────────────────────
+    REG_RENAMED           = "REG_RENAMED"
+    REG_DELETED           = "REG_DELETED"
+    REG_ADDED             = "REG_ADDED"
+    REG_MOVED             = "REG_MOVED"            # same name, offset changed
+    REG_SIZE_CHANGED      = "REG_SIZE_CHANGED"     # 8/16/32/64-bit width change
+    REG_ARRAY_CHANGED     = "REG_ARRAY_CHANGED"    # scalar ↔ array (e.g. CH_CON[8])
+    REG_CLUSTER_CHANGED   = "REG_CLUSTER_CHANGED"  # IP restructuring into groups
 
-    # LLM routing: which types require Qwen2.5-Coder-7B
-    LLM_REQUIRED = {COMMENT_CHANGED, MULTI_CHANGED}
-    LLM_IF_DESC  = {REG_ADDED, FIELD_ADDED}
+    # ── Field existence (Types 4–6, 13–14, 24) ────────────────────────────
+    FIELD_RENAMED            = "FIELD_RENAMED"
+    FIELD_DELETED            = "FIELD_DELETED"
+    FIELD_ADDED              = "FIELD_ADDED"
+    FIELD_SPLIT              = "FIELD_SPLIT"           # 1 field → 2+ (same bits)
+    FIELD_MERGED             = "FIELD_MERGED"          # 2+ fields → 1 (same bits)
+    FIELD_MOVED_CROSS_REG    = "FIELD_MOVED_CROSS_REG" # field jumps to other register
+
+    # ── Field attributes (Types 7–12, 16–18) ──────────────────────────────
+    BITWIDTH_CHANGED      = "BITWIDTH_CHANGED"
+    ACCESS_CHANGED        = "ACCESS_CHANGED"
+    OFFSET_CHANGED        = "OFFSET_CHANGED"
+    RESET_CHANGED         = "RESET_CHANGED"
+    COMMENT_CHANGED       = "COMMENT_CHANGED"
+    MULTI_CHANGED         = "MULTI_CHANGED"
+    RESERVED_PROMOTED     = "RESERVED_PROMOTED"    # full RSVD range → named field
+    FIELD_POLARITY_CHANGED = "FIELD_POLARITY_CHANGED"  # access+reset+desc all flip
+    DESCRIPTION_ADDED     = "DESCRIPTION_ADDED"    # empty desc → non-empty
+
+    # ── Field semantics / behavior (Types 22–27) ───────────────────────────
+    FIELD_ENUM_CHANGED    = "FIELD_ENUM_CHANGED"   # value mapping changed
+    FIELD_WRITE_ONCE      = "FIELD_WRITE_ONCE"     # gains lock / RWL access
+    WRITE_MASK_CHANGED    = "WRITE_MASK_CHANGED"   # partial sub-field goes RO
+    FIELD_SELF_CLEARING   = "FIELD_SELF_CLEARING"  # SC / auto-reset / pulse
+    FIELD_STICKY_CHANGED  = "FIELD_STICKY_CHANGED" # RO → W1C sticky
+    RESERVED_PARTIAL_ACTIVATED = "RESERVED_PARTIAL_ACTIVATED"  # some RSVD bits → active
+
+    # ── Special ────────────────────────────────────────────────────────────
+    UNCHANGED             = "UNCHANGED"
+    MANUAL_REVIEW         = "MANUAL_REVIEW"  # cannot auto-patch safely
+
+    # LLM routing sets
+    LLM_REQUIRED = {
+        COMMENT_CHANGED, MULTI_CHANGED, FIELD_POLARITY_CHANGED,
+        FIELD_ENUM_CHANGED, FIELD_WRITE_ONCE, FIELD_SELF_CLEARING,
+        FIELD_STICKY_CHANGED, DESCRIPTION_ADDED,
+        FIELD_SPLIT, FIELD_MERGED,
+    }
+    LLM_IF_DESC  = {REG_ADDED, FIELD_ADDED, RESERVED_PROMOTED, RESERVED_PARTIAL_ACTIVATED}
+
+    # Change types that must NOT be auto-patched — always flag for manual review
+    MANUAL_REVIEW_REQUIRED = {
+        REG_DELETED, REG_ADDED,
+        REG_ARRAY_CHANGED, REG_CLUSTER_CHANGED,
+        WRITE_MASK_CHANGED,
+    }
 
     @classmethod
     def needs_llm(cls, change_type: str, has_desc: bool = False) -> bool:
@@ -63,6 +101,11 @@ class ChangeType:
         if change_type in cls.LLM_IF_DESC and has_desc:
             return True
         return False
+
+    @classmethod
+    def is_manual_review(cls, change_type: str) -> bool:
+        """Return True if this change type cannot be auto-patched."""
+        return change_type in cls.MANUAL_REVIEW_REQUIRED
 
 
 # ---------------------------------------------------------------------------
@@ -793,15 +836,118 @@ class SfrDiffAnalyzer:
         old_f: FieldIR, new_f: FieldIR,
         old_reg: RegisterIR, new_reg: RegisterIR,
     ) -> List[ChangeRecord]:
-        """Classify a changed field using priority 7–12."""
+        """Classify a changed field using priority 7–28."""
         diffs: List[str] = []
 
-        bitwidth_changed = old_f.popcount != new_f.popcount
-        access_changed   = old_f.access   != new_f.access
-        offset_changed   = old_f.shift    != new_f.shift
-        reset_changed    = old_f.reset    != new_f.reset
-        comment_changed  = old_f.desc.strip() != new_f.desc.strip()
+        bitwidth_changed  = old_f.popcount    != new_f.popcount
+        access_changed    = old_f.access      != new_f.access
+        offset_changed    = old_f.shift       != new_f.shift
+        reset_changed     = old_f.reset       != new_f.reset
+        comment_changed   = old_f.desc.strip() != new_f.desc.strip()
+        desc_added        = (not old_f.has_desc) and new_f.has_desc
 
+        # ── Semantic / behavioral detection ───────────────────────────────
+        # Type 17: FIELD_POLARITY_CHANGED — access + reset + comment all changed
+        polarity_changed = access_changed and reset_changed and comment_changed
+
+        # Type 23: FIELD_WRITE_ONCE — new access type contains lock indicator
+        _write_once_markers = {"RWL", "W1", "OTP", "LOCK"}
+        write_once_gained = (
+            new_f.access.upper() in _write_once_markers
+            or "write-once" in new_f.desc.lower()
+            or "write once" in new_f.desc.lower()
+            or "otp" in new_f.desc.lower()
+        ) and not (
+            old_f.access.upper() in _write_once_markers
+            or "write-once" in old_f.desc.lower()
+        )
+
+        # Type 26: FIELD_SELF_CLEARING
+        _sc_markers = {"SC", "SELFCLR", "SELF_CLR", "SELF-CLR"}
+        self_clearing_gained = (
+            new_f.access.upper() in _sc_markers
+            or "self-clearing" in new_f.desc.lower()
+            or "self clearing" in new_f.desc.lower()
+            or "auto-reset" in new_f.desc.lower()
+            or "pulse" in new_f.desc.lower()
+        ) and new_f.access.upper() not in ("RW", "RO", "WO", "W1C", "W1S")
+
+        # Type 27: FIELD_STICKY_CHANGED — RO → W1C transition
+        sticky_changed = (
+            old_f.access.upper() == "RO"
+            and new_f.access.upper() == "W1C"
+        )
+
+        # Type 22: FIELD_ENUM_CHANGED — detect value mapping patterns
+        _ENUM_RE = re.compile(r'\d+\s*=\s*\w+')
+        old_enums = set(_ENUM_RE.findall(old_f.desc))
+        new_enums = set(_ENUM_RE.findall(new_f.desc))
+        enum_changed = bool(old_enums or new_enums) and (old_enums != new_enums)
+
+        # ── Single-change classification ───────────────────────────────────
+        # Priority: more-specific checks first
+
+        if polarity_changed:
+            return [ChangeRecord(
+                change_type=ChangeType.FIELD_POLARITY_CHANGED,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=["access", "reset", "desc all changed (polarity flip)"],
+            )]
+
+        if write_once_gained:
+            return [ChangeRecord(
+                change_type=ChangeType.FIELD_WRITE_ONCE,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=[f"field gained write-once/lock: {new_f.access}"],
+            )]
+
+        if self_clearing_gained:
+            return [ChangeRecord(
+                change_type=ChangeType.FIELD_SELF_CLEARING,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=[f"field became self-clearing: {new_f.access}"],
+            )]
+
+        if sticky_changed:
+            return [ChangeRecord(
+                change_type=ChangeType.FIELD_STICKY_CHANGED,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=["RO → W1C sticky transition"],
+            )]
+
+        if desc_added and not (bitwidth_changed or access_changed or offset_changed or reset_changed):
+            return [ChangeRecord(
+                change_type=ChangeType.DESCRIPTION_ADDED,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=[f"description added: {new_f.desc[:60]}"],
+            )]
+
+        if enum_changed and comment_changed and not (bitwidth_changed or access_changed or offset_changed):
+            return [ChangeRecord(
+                change_type=ChangeType.FIELD_ENUM_CHANGED,
+                reg_name=old_reg.name, field_name=old_f.name,
+                old_field=old_f, new_field=new_f,
+                old_reg=old_reg, new_reg=new_reg,
+                needs_llm=True,
+                details=[f"enum values changed: {old_enums} → {new_enums}"],
+            )]
+
+        # ── Standard priority 7-12 classification ─────────────────────────
         if bitwidth_changed: diffs.append("BITWIDTH_CHANGED")
         if access_changed:   diffs.append("ACCESS_CHANGED")
         if offset_changed:   diffs.append("OFFSET_CHANGED")
@@ -816,7 +962,7 @@ class SfrDiffAnalyzer:
             change_type = diffs[0]
             needs_llm   = ChangeType.needs_llm(change_type, new_f.has_desc)
         else:
-            # mask or msb changed without bitwidth change (e.g. same popcount different position)
+            # mask or msb changed without bitwidth change (same popcount, different position)
             change_type = ChangeType.BITWIDTH_CHANGED
             diffs       = ["mask_position_changed"]
             needs_llm   = False

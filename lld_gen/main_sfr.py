@@ -45,7 +45,7 @@ from lld_gen.lld_patcher import LLDPatcher
 from lld_gen.llm_client import LLMClient
 from lld_gen.compile_check import run_compile_check
 from lld_gen.pr_stage import stage_pr
-from lld_gen.config import load_config, discover_jobs
+from lld_gen.config import load_config, discover_jobs, load_workflow_config
 from lld_gen.batch_runner import BatchRunner
 
 
@@ -444,6 +444,57 @@ def _load_change_records(data: list) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Sub-command: workflow (v3.0 full pipeline)
+# ---------------------------------------------------------------------------
+def _cmd_workflow(args: argparse.Namespace) -> None:
+    """Full end-to-end: IPxact repo → SFR → LLD patch → Bitbucket PR."""
+    from lld_gen.workflow_runner import WorkflowRunner
+
+    cfg = load_workflow_config(args.config)
+    if args.no_llm:
+        cfg.no_llm = True
+    if args.no_git:
+        cfg.no_git = True
+
+    runner = WorkflowRunner(cfg)
+
+    if getattr(args, "dry_run", False):
+        # Dry-run: clone and diff only, no patching
+        ipxact_path, lld_path = runner._clone_repos()
+        ip_sfr_map = runner._convert_ipxact(ipxact_path)
+        print(f"\n[DRY-RUN] Would process {len(ip_sfr_map)} IP(s): {', '.join(ip_sfr_map)}")
+        for ip, new_sfr in sorted(ip_sfr_map.items()):
+            old_sfr = runner._find_current_sfr(lld_path, ip)
+            if old_sfr:
+                changes = classify_sfr_diff(old_sfr, new_sfr, ip=ip)
+                print(f"  {ip}: {len(changes)} change(s)")
+                print("  " + "\n  ".join(summarize_changes(changes).splitlines()[1:]))
+            else:
+                print(f"  {ip}: No current SFR found — would be skipped")
+        return
+
+    result = runner.run()
+    sys.exit(0 if result.all_ok else 1)
+
+
+def _cmd_init_workflow_config(args: argparse.Namespace) -> None:
+    """Generate a starter workflow_config.yaml."""
+    import shutil as _shutil
+    out = Path(getattr(args, "output", "workflow_config.yaml"))
+    if out.exists() and not getattr(args, "force", False):
+        print(f"[init-workflow-config] {out} already exists. Use --force to overwrite.")
+        return
+    # Copy the bundled template
+    template = Path(__file__).parent.parent / "workflow_config.yaml"
+    if template.exists():
+        _shutil.copy2(template, out)
+        print(f"[init-workflow-config] Written: {out}")
+    else:
+        print(f"[init-workflow-config] Template not found: {template}")
+        print("  Create workflow_config.yaml manually using the documentation.")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
@@ -526,6 +577,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ic.add_argument("--force", action="store_true", help="Overwrite existing config")
 
+    # ── workflow (full end-to-end: IPxact → PR) ────────────────────────────
+    wf = sub.add_parser(
+        "workflow",
+        help="Full v3.0 pipeline: clone IPxact repo → convert → diff → patch LLD → PR",
+    )
+    wf.add_argument(
+        "--config", default="workflow_config.yaml", metavar="FILE",
+        help="Path to workflow_config.yaml (default: workflow_config.yaml)",
+    )
+    wf.add_argument("--no-llm",  action="store_true", help="Override: disable LLM")
+    wf.add_argument("--no-git",  action="store_true", help="Override: skip git/PR")
+    wf.add_argument("--dry-run", action="store_true", help="Clone + diff only, no patch")
+
+    # ── init-workflow-config ─────────────────────────────────────────────────
+    iwf = sub.add_parser(
+        "init-workflow-config",
+        help="Generate a starter workflow_config.yaml in the current directory",
+    )
+    iwf.add_argument(
+        "--output", default="workflow_config.yaml", metavar="FILE",
+        help="Where to write the config file",
+    )
+    iwf.add_argument("--force", action="store_true", help="Overwrite existing")
+
     return p
 
 
@@ -534,13 +609,15 @@ def main() -> None:
     args   = parser.parse_args()
 
     dispatch = {
-        "diff":           _cmd_diff,
-        "patch":          _cmd_patch,
-        "compile-check":  _cmd_compile_check,
-        "stage":          _cmd_stage,
-        "run":            _cmd_run,
-        "run-config":     _cmd_run_config,
-        "init-config":    _cmd_init_config,
+        "diff":                  _cmd_diff,
+        "patch":                 _cmd_patch,
+        "compile-check":         _cmd_compile_check,
+        "stage":                 _cmd_stage,
+        "run":                   _cmd_run,
+        "run-config":            _cmd_run_config,
+        "init-config":           _cmd_init_config,
+        "workflow":               _cmd_workflow,
+        "init-workflow-config":   _cmd_init_workflow_config,
     }
     dispatch[args.command](args)
 

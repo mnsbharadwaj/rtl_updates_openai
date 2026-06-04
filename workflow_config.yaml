@@ -1,0 +1,125 @@
+# =============================================================================
+# workflow_config.yaml — LLD Auto-Patcher v3.0 Configuration
+# Full end-to-end workflow: IPxact → SFR → LLD patch → Bitbucket PR
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# [A] IP-XACT Source — repository containing new IP-XACT .xml register maps
+# -----------------------------------------------------------------------------
+ipxact:
+  url:    "https://bitbucket.org/your-org/ipxact-repo.git"
+  branch: "main"
+  tag:    ""                  # or tag: "v2.3.0"  (overrides branch)
+  commit: ""                  # or commit: "abc1234"  (overrides tag/branch)
+  path:   "ipxact/"           # subfolder within repo where .xml files live
+  token:  ""                  # Bitbucket access token (or set BB_TOKEN env var)
+
+# -----------------------------------------------------------------------------
+# [A] LLD/SFR Repository — current code (SFR_*.h + lld_*.h)
+# -----------------------------------------------------------------------------
+lld_repo:
+  url:    "https://bitbucket.org/your-org/lld-repo.git"
+  branch: "main"              # branch to patch FROM
+  commit: ""
+  path:   ""                  # if SFR/LLD files are in a subdirectory, set here
+  token:  ""                  # Bitbucket access token (or set BB_TOKEN env var)
+
+# Fallback directories (used when lld_repo.url is empty or for simple/local mode)
+sfr_old_dir: "./old_sfr"      # current SFR_*.h files
+sfr_new_dir: "./new_sfr"      # converted SFR_*.h from IPxact (populated by Step B)
+lld_dir:     "./lld"          # current lld_*.h files
+output_dir:  "./lld_patched"  # patched LLD output directory
+tests_dir:   "./tests_generated"
+
+# -----------------------------------------------------------------------------
+# [H] PR Target — where to raise the pull-request
+# Empty url/branch = raise PR to the same lld_repo.branch
+# -----------------------------------------------------------------------------
+pr_target:
+  url:    ""                  # empty = same as lld_repo.url
+  branch: ""                  # empty = same as lld_repo.branch (default target)
+  token:  ""
+
+pr_title_prefix: "feat(lld): SFR auto-patch"
+
+# -----------------------------------------------------------------------------
+# [B] IP-XACT Converter
+# Script that converts one .xml → SFR_<IP>.h
+# Interface: python convert.py <input.xml> -o <output.h> [--ip <IP>]
+# -----------------------------------------------------------------------------
+convert_script: "./convert.py"
+
+# IP filter — empty list = process all IPs found in IPxact repo
+# ip_filter:
+#   - PMU
+#   - DMA
+#   - UART
+
+# -----------------------------------------------------------------------------
+# [E] LLM Settings
+# -----------------------------------------------------------------------------
+# Disable all LLM calls (template-only mode):
+no_llm:       false
+
+# Ollama (local, zero-cost) — takes priority if reachable:
+ollama_model: "qwen2.5-coder"    # partial match: finds qwen2.5-coder:1.5b etc.
+                                  # leave empty "" to skip Ollama
+
+# HuggingFace (cloud) — fallback if Ollama not configured:
+hf_token:     ""                  # or set HF_TOKEN environment variable
+                                  # get from: huggingface.co/settings/tokens
+
+# LLM-generated unit tests (richer struct-based tests vs template):
+llm_test_gen: true
+
+# -----------------------------------------------------------------------------
+# [E] Patching Rules
+# -----------------------------------------------------------------------------
+# Max LLM retries per function before marking MANUAL_REVIEW (was 3, now 5):
+max_llm_retries: 5
+
+# gcc check after every LLM-patched function (not just at the end):
+per_fn_compile: true
+
+# Do NOT auto-patch REG_ADDED / REG_DELETED — flag in PR for manual review:
+skip_reg_added:   true
+skip_reg_deleted: true
+
+# Scan lld_dir for callers of changed LLD functions:
+cross_lld_scan:   true
+lld_search_depth: 3              # subdirectory depth to scan
+
+# Generate #define enum constants for FIELD_ENUM_CHANGED:
+emit_enum_defines: false
+
+# -----------------------------------------------------------------------------
+# [G] Git / Commit Settings
+# -----------------------------------------------------------------------------
+# One commit per SFR file changed (not one giant commit):
+atomic_commits: true
+
+# Git commit message prefix:
+commit_prefix: "feat(lld)"
+
+# Set to true to skip all git operations (dry-run mode):
+no_git: false
+
+# GitHub/Bitbucket repo URL (used for PR link in PR_DESCRIPTION.md):
+# github_url: "https://github.com/your-org/lld-repo"
+
+# -----------------------------------------------------------------------------
+# [E] Compiler
+# -----------------------------------------------------------------------------
+gcc: null     # null = auto-detect from PATH
+              # Windows: choco install mingw   or   winget install GnuWin32.GCC
+
+# -----------------------------------------------------------------------------
+# Per-IP overrides (optional)
+# Override any setting for a specific IP:
+# -----------------------------------------------------------------------------
+# ip_overrides:
+#   PMU:
+#     no_llm: false
+#     ollama_model: "qwen2.5-coder"
+#   UART:
+#     no_llm: true          # template-only for UART
