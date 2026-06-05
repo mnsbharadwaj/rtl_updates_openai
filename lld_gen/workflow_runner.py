@@ -36,7 +36,7 @@ from lld_gen.git_manager import GitManager, RepoConfig, PRConfig
 from lld_gen.ipxact_pipeline import IpxactPipeline
 from lld_gen.sfr_diff_analyzer import classify_sfr_diff, summarize_changes, ChangeType
 from lld_gen.lld_patcher import LLDPatcher
-from lld_gen.llm_client import LLMClient
+from lld_gen.llm_client import LLMClient, make_llm_client
 from lld_gen.compile_check import run_compile_check, run_compile_check_one_fn
 from lld_gen.pr_stage import stage_pr, build_pr_description
 from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
@@ -442,16 +442,19 @@ class WorkflowRunner:
             print(f"[ERROR] {run_result.error}")
             return run_result
 
-        # ── C: Set up LLM client ──────────────────────────────────────────────
-        import os
+        # ── C: Set up LLM client (from llm: config block) ─────────────────────
         llm_client: Optional[LLMClient] = None
         if not self.cfg.no_llm:
-            hf_token = self.cfg.hf_token or os.environ.get("HF_TOKEN", "")
-            llm_client = LLMClient(
-                hf_token     = hf_token or None,
-                ollama_model = self.cfg.ollama_model or None,
-            )
-            if not llm_client.available:
+            # Build config dict from WorkflowConfig fields for make_llm_client()
+            llm_data = {
+                "no_llm":      self.cfg.no_llm,
+                "llm":         getattr(self.cfg, "llm", {}),
+                # legacy flat fields still honoured for backward compat
+                "ollama_model": getattr(self.cfg, "ollama_model", ""),
+                "hf_token":    getattr(self.cfg, "hf_token", ""),
+            }
+            llm_client = make_llm_client(llm_data)
+            if not llm_client or not llm_client.available:
                 print("  [LLM] No backend available — falling back to template mode")
                 llm_client = None
 

@@ -94,10 +94,11 @@ class WorkflowConfig(PatcherConfig):
     """
     Full end-to-end workflow configuration.
     Extends PatcherConfig with:
-      - ipxact:       repo/path for new IP-XACT (.xml) files
-      - lld_repo:     repo holding current SFR_*.h + lld_*.h
-      - pr_target:    where to raise the PR (defaults to lld_repo)
-      - convert_script: path to ipxact→SFR converter script
+      - ipxact:         repo/path for new IP-XACT (.xml) files
+      - lld_repo:       repo holding current SFR_*.h + lld_*.h
+      - pr_target:      where to raise the PR (defaults to lld_repo)
+      - convert_script: path to ipxact->SFR converter script
+      - llm:            raw llm: dict from YAML (passed to make_llm_client)
     """
     # IP-XACT source (new register descriptions)
     ipxact:          RepoSpec = field(default_factory=RepoSpec)
@@ -109,6 +110,8 @@ class WorkflowConfig(PatcherConfig):
     convert_script:  str = "./convert.py"
     # PR title prefix
     pr_title_prefix: str = "feat(lld): SFR auto-patch"
+    # Raw llm: dict from YAML (used by make_llm_client)
+    llm:             dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +170,27 @@ def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
     out_dir  = _path("output_dir", str(lld_dir))
     tst_dir  = _path("tests_dir",  str(lld_dir))
 
+    # Resolve token for lld_repo from env if not in config
+    import os as _os
+    def _resolve_token(spec: RepoSpec) -> RepoSpec:
+        if not spec.token:
+            from lld_gen.git_manager import _detect_host
+            host = _detect_host(spec.url)
+            if host == "github":
+                spec.token = _os.environ.get("GITHUB_TOKEN",
+                             _os.environ.get("GH_TOKEN", ""))
+            else:
+                spec.token = _os.environ.get("BB_TOKEN",
+                             _os.environ.get("BITBUCKET_TOKEN", ""))
+        return spec
+
+    ipxact_spec  = _resolve_token(_repo_spec("ipxact"))
+    lld_spec     = _resolve_token(_repo_spec("lld_repo"))
+    pr_spec      = _repo_spec("pr_target")
+    # pr_target token inherits from lld_repo if not set
+    if not pr_spec.token:
+        pr_spec.token = lld_spec.token
+
     return WorkflowConfig(
         # PatcherConfig fields
         sfr_old_dir  = sfr_old,
@@ -194,11 +218,13 @@ def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
         commit_prefix     = _str("commit_prefix",    "feat(lld)"),
         emit_enum_defines = _bool("emit_enum_defines", False),
         # Workflow-specific
-        ipxact          = _repo_spec("ipxact"),
-        lld_repo        = _repo_spec("lld_repo"),
-        pr_target       = _repo_spec("pr_target"),
+        ipxact          = ipxact_spec,
+        lld_repo        = lld_spec,
+        pr_target       = pr_spec,
         convert_script  = _str("convert_script", "./convert.py"),
         pr_title_prefix = _str("pr_title_prefix", "feat(lld): SFR auto-patch"),
+        # Pass raw llm: block for make_llm_client()
+        llm             = dict(data.get("llm") or {}),
     )
 
 

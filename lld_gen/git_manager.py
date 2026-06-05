@@ -100,9 +100,17 @@ def _normalize_url(url: str) -> str:
     return url.removesuffix(".git")
 
 
-def _detect_bitbucket_server(url: str) -> bool:
-    """Return True if URL looks like Bitbucket Server (not Cloud)."""
-    return "api.bitbucket.org" not in url and "bitbucket.org" not in url
+def _detect_host(url: str) -> str:
+    """
+    Return 'github' | 'bitbucket_cloud' | 'bitbucket_server'.
+    Covers both HTTPS and SSH remotes.
+    """
+    u = url.lower()
+    if "github.com" in u:
+        return "github"
+    if "bitbucket.org" in u:
+        return "bitbucket_cloud"
+    return "bitbucket_server"
 
 
 def _repo_slug(url: str) -> tuple[str, str]:
@@ -258,33 +266,99 @@ class GitManager:
         pr_cfg:      Optional[PRConfig] = None,
     ) -> str:
         """
-        Create a pull-request via Bitbucket REST API.
-        Returns the PR URL on success, or empty string on failure.
+        Create a pull-request via REST API.
+        Auto-detects GitHub, Bitbucket Cloud, or Bitbucket Server from URL.
+        Returns the PR web URL on success, or empty string on failure.
+
+        Auth:
+          GitHub         — token in GITHUB_TOKEN env or repo_cfg.token
+          Bitbucket      — token in BB_TOKEN / BITBUCKET_TOKEN env or repo_cfg.token
         """
         if not _HAS_URLLIB:
+            print("  [PR-WARN] urllib not available — skipping API PR creation")
             return ""
 
         target_url = pr_cfg.url if (pr_cfg and pr_cfg.url) else self.cfg.url
         target_url = _normalize_url(target_url)
         token      = self.cfg.token
 
-        if not token:
-            token = os.environ.get("BB_TOKEN", os.environ.get("BITBUCKET_TOKEN", ""))
+        host = _detect_host(target_url)
 
-        is_server = _detect_bitbucket_server(target_url)
+        if not token:
+            if host == "github":
+                token = os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
+            else:
+                token = os.environ.get("BB_TOKEN", os.environ.get("BITBUCKET_TOKEN", ""))
+
+        if not token:
+            print(
+                f"  [PR-WARN] No token found for {host}. "
+                f"Set GITHUB_TOKEN (GitHub) or BB_TOKEN (Bitbucket) env var, "
+                f"or add 'token:' to your repo spec in the config."
+            )
 
         try:
-            if is_server:
-                return self._create_pr_server(
+            if host == "github":
+                return self._create_pr_github(
                     target_url, token, title, description, from_branch, to_branch
                 )
-            else:
+            elif host == "bitbucket_cloud":
                 return self._create_pr_cloud(
+                    target_url, token, title, description, from_branch, to_branch
+                )
+            else:  # bitbucket_server
+                return self._create_pr_server(
                     target_url, token, title, description, from_branch, to_branch
                 )
         except Exception as exc:
             print(f"  [PR-WARN] Could not create PR via API: {exc}")
+            # Emit manual PR URL as fallback
+            self._print_manual_pr_link(target_url, from_branch, to_branch, host)
             return ""
+
+    def _print_manual_pr_link(
+        self, repo_url: str, from_branch: str, to_branch: str, host: str
+    ) -> None:
+        """Print a clickable URL the user can open to create the PR manually."""
+        if host == "github":
+            url = f"{repo_url}/compare/{to_branch}...{from_branch}?expand=1"
+        elif host == "bitbucket_cloud":
+            url = f"{repo_url}/pull-requests/new?source={from_branch}&dest={to_branch}"
+        else:
+            url = f"{repo_url}/pull-requests"
+        print(f"  [PR] Open this URL to create the PR manually:\n       {url}")
+
+    def _create_pr_github(
+        self, base_url: str, token: str,
+        title: str, description: str,
+        from_branch: str, to_branch: str,
+    ) -> str:
+        """GitHub REST API v3 — create pull request."""
+        owner, repo = _repo_slug(base_url)
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+        payload = _json.dumps({
+            "title":  title,
+            "body":   description,
+            "head":   from_branch,
+            "base":   to_branch,
+            "draft":  False,
+        }).encode()
+        headers = {
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {token}",
+            "Accept":        "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        req = _req.Request(api_url, data=payload, headers=headers, method="POST")
+        try:
+            with _req.urlopen(req, timeout=30) as resp:
+                data = _json.loads(resp.read())
+                pr_url = data.get("html_url", "")
+                print(f"  [PR] GitHub PR created: {pr_url}")
+                return pr_url
+        except _uerr.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            raise RuntimeError(f"GitHub PR API {e.code}: {body[:300]}")
 
     def _create_pr_cloud(
         self, base_url: str, token: str,
