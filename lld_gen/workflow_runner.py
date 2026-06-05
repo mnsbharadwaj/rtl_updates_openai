@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -61,14 +62,16 @@ class IPWorkflowResult:
     manual_review_items: List[str] = field(default_factory=list)
     cross_ref_files:  List[str] = field(default_factory=list)
     change_summary:   str = ""
+    elapsed_s:        float = 0.0   # wall-clock seconds for this IP
 
 
 @dataclass
 class WorkflowRunResult:
     """Aggregate result for the full multi-IP run."""
-    ip_results:  List[IPWorkflowResult] = field(default_factory=list)
-    pr_url:      str = ""
-    error:       str = ""
+    ip_results:      List[IPWorkflowResult] = field(default_factory=list)
+    pr_url:          str = ""
+    error:           str = ""
+    total_elapsed_s: float = 0.0   # total wall-clock seconds
 
     @property
     def all_ok(self) -> bool:
@@ -86,10 +89,15 @@ class WorkflowRunResult:
                 f"{r.n_changes:>3} changes  "
                 f"{r.n_auto_patched:>3} auto  "
                 f"{r.n_manual_review:>3} manual  "
-                f"compile={'OK' if r.compile_ok else 'FAIL'}"
+                f"compile={'OK' if r.compile_ok else 'FAIL'}  "
+                f"{r.elapsed_s:>6.1f}s"
             )
             if r.pr_url:
                 print(f"     PR: {r.pr_url}")
+        print("═" * 68)
+        total_m, total_s = divmod(int(self.total_elapsed_s), 60)
+        print(f"  Total pipeline time : {total_m}m {total_s:02d}s  "
+              f"({self.total_elapsed_s:.2f}s)")
         print("═" * 68)
 
 
@@ -411,6 +419,7 @@ class WorkflowRunner:
     def run(self) -> WorkflowRunResult:
         """Execute the full workflow. Returns a WorkflowRunResult."""
         run_result = WorkflowRunResult()
+        pipeline_start = time.perf_counter()
 
         # ── A: Clone repos ────────────────────────────────────────────────────
         try:
@@ -447,13 +456,12 @@ class WorkflowRunner:
                 llm_client = None
 
         from lld_gen.compile_check import _find_gcc
-        gcc_exe = self.cfg.gcc or _find_gcc()
-
         # ── D-G: Run per-IP pipeline ──────────────────────────────────────────
         print(f"\n[D-G] Processing {len(ip_sfr_map)} IP(s): {', '.join(ip_sfr_map)}")
         for ip, new_sfr in sorted(ip_sfr_map.items()):
             print(f"\n{'─' * 60}")
             print(f"  IP: {ip}")
+            ip_start = time.perf_counter()
             try:
                 ip_result = self._run_one_ip(
                     ip         = ip,
@@ -465,7 +473,7 @@ class WorkflowRunner:
             except Exception as exc:
                 ip_result = IPWorkflowResult(ip=ip, status="FAIL", error=str(exc))
                 print(f"  [FAIL] {ip}: {exc}")
-
+            ip_result.elapsed_s = time.perf_counter() - ip_start
             run_result.ip_results.append(ip_result)
 
         # ── H: Push + raise PR ────────────────────────────────────────────────
@@ -509,6 +517,7 @@ class WorkflowRunner:
             except Exception as exc:
                 print(f"  [H-WARN] Push/PR failed: {exc}")
 
+        run_result.total_elapsed_s = time.perf_counter() - pipeline_start
         run_result.print_summary()
         return run_result
 

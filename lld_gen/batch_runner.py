@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -42,6 +43,7 @@ class IPResult:
     status:       str = "PENDING"   # OK | WARN | FAIL | SKIP
     error:        str = ""
     compile_ok:   bool = False
+    elapsed_s:    float = 0.0       # wall-clock seconds for this IP
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +102,14 @@ class BatchRunner:
         self.cfg.tests_dir.mkdir(parents=True, exist_ok=True)
 
         # Process each IP
+        self._pipeline_start = time.perf_counter()
         for job in jobs:
+            ip_start = time.perf_counter()
             result = self._run_one(job)
+            result.elapsed_s = time.perf_counter() - ip_start
             self._results.append(result)
+
+        self._total_elapsed = time.perf_counter() - self._pipeline_start
 
         # Print summary
         self._print_summary()
@@ -297,17 +304,18 @@ class BatchRunner:
         return result
 
     def _print_summary(self) -> None:
-        """Print final summary table."""
+        """Print final summary table with timing."""
         print("\n" + "=" * 70)
         print("  BATCH SUMMARY")
         print("=" * 70)
-        print(f"  {'IP':<12} {'Status':<8} {'Changes':<10} {'Output LLD'}")
-        print(f"  {'-'*12} {'-'*8} {'-'*10} {'-'*35}")
+        print(f"  {'IP':<12} {'Status':<8} {'Changes':<10} {'Time':>7}  {'Output LLD'}")
+        print(f"  {'-'*12} {'-'*8} {'-'*10} {'-'*7}  {'-'*35}")
 
         ok = warn = fail = skip = 0
         for r in self._results:
             icon = {"OK": "[OK]  ", "WARN": "[WARN]", "FAIL": "[FAIL]", "SKIP": "[SKIP]"}.get(r.status, "     ")
-            print(f"  {r.ip:<12} {icon:<8} {r.n_changes:<10} {r.lld_out.name}")
+            elapsed_str = f"{r.elapsed_s:.1f}s"
+            print(f"  {r.ip:<12} {icon:<8} {r.n_changes:<10} {elapsed_str:>7}  {r.lld_out.name}")
             if r.error:
                 print(f"    Error: {r.error}")
             if r.status == "OK":   ok   += 1
@@ -315,10 +323,14 @@ class BatchRunner:
             if r.status == "FAIL": fail += 1
             if r.status == "SKIP": skip += 1
 
+        total_elapsed = getattr(self, "_total_elapsed", 0.0)
+        total_m, total_s = divmod(int(total_elapsed), 60)
+
         print("-" * 70)
         print(f"  Total: {len(self._results)}  OK={ok}  WARN={warn}  FAIL={fail}  SKIP={skip}")
         print(f"\n  Patched LLD files -> {self.cfg.output_dir}")
         print(f"  Test files        -> {self.cfg.tests_dir}")
+        print(f"  Pipeline time     : {total_m}m {total_s:02d}s  ({total_elapsed:.2f}s)")
         print("=" * 70)
 
 

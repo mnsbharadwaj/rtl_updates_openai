@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 # Ensure project root is on sys.path when run as python -m lld_gen.main_sfr
@@ -164,6 +165,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
     # Auto-detect IP from filename if not provided
     from lld_gen.sfr_diff_analyzer import _ip_from_filename
     ip = args.ip or _ip_from_filename(args.old)
+    _t0 = time.perf_counter()
 
     print("=" * 70)
     print(f" LLD Auto-Patcher -- IP: {ip}  (full pipeline)")
@@ -176,6 +178,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     if not changes:
         print("No changes detected. lld.h is up to date.")
+        elapsed = time.perf_counter() - _t0
+        print(f"\n  Pipeline time: {elapsed:.2f}s")
         return
 
     # Step 2: Patch
@@ -207,6 +211,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     if not compile_result.success and not compile_result.needs_review:
         print("[FATAL] Compile check failed. PR staging aborted.")
+        elapsed = time.perf_counter() - _t0
+        print(f"\n  Pipeline time: {elapsed:.2f}s")
         sys.exit(1)
 
     # Step 4: Stage PR
@@ -221,12 +227,15 @@ def _cmd_run(args: argparse.Namespace) -> None:
         no_git=getattr(args, "no_git", False),
     )
 
+    elapsed = time.perf_counter() - _t0
+    total_m, total_s = divmod(int(elapsed), 60)
     print("\n" + "=" * 70)
     print(" Done!")
-    print(f"  IP detected: {ip}")
-    print(f"  lld.h      : {args.lld}")
-    print(f"  test file  : {test_file}")
-    print(f"  PR desc    : {pr_path}")
+    print(f"  IP detected   : {ip}")
+    print(f"  lld.h         : {args.lld}")
+    print(f"  test file     : {test_file}")
+    print(f"  PR desc       : {pr_path}")
+    print(f"  Pipeline time : {total_m}m {total_s:02d}s  ({elapsed:.2f}s)")
     print("=" * 70)
 
 
@@ -248,7 +257,7 @@ def _cmd_run_config(args: argparse.Namespace) -> None:
         cfg.no_git = True
 
     runner  = BatchRunner(cfg)
-    results = runner.run()
+    results = runner.run()   # timing printed inside run()
 
     fail_count = sum(1 for r in results if r.status == "FAIL")
     if fail_count:
@@ -447,7 +456,7 @@ def _load_change_records(data: list) -> list:
 # Sub-command: workflow (v3.0 full pipeline)
 # ---------------------------------------------------------------------------
 def _cmd_workflow(args: argparse.Namespace) -> None:
-    """Full end-to-end: IPxact repo → SFR → LLD patch → Bitbucket PR."""
+    """Full end-to-end: IPxact repo -> SFR -> LLD patch -> Bitbucket PR."""
     from lld_gen.workflow_runner import WorkflowRunner
 
     cfg = load_workflow_config(args.config)
@@ -460,6 +469,7 @@ def _cmd_workflow(args: argparse.Namespace) -> None:
 
     if getattr(args, "dry_run", False):
         # Dry-run: clone and diff only, no patching
+        _t0 = time.perf_counter()
         ipxact_path, lld_path = runner._clone_repos()
         ip_sfr_map = runner._convert_ipxact(ipxact_path)
         print(f"\n[DRY-RUN] Would process {len(ip_sfr_map)} IP(s): {', '.join(ip_sfr_map)}")
@@ -470,10 +480,17 @@ def _cmd_workflow(args: argparse.Namespace) -> None:
                 print(f"  {ip}: {len(changes)} change(s)")
                 print("  " + "\n  ".join(summarize_changes(changes).splitlines()[1:]))
             else:
-                print(f"  {ip}: No current SFR found — would be skipped")
+                print(f"  {ip}: No current SFR found -- would be skipped")
+        elapsed = time.perf_counter() - _t0
+        total_m, total_s = divmod(int(elapsed), 60)
+        print(f"\n  [DRY-RUN] Pipeline time: {total_m}m {total_s:02d}s  ({elapsed:.2f}s)")
         return
 
-    result = runner.run()
+    _t0 = time.perf_counter()
+    result = runner.run()   # timing printed inside WorkflowRunResult.print_summary()
+    elapsed = time.perf_counter() - _t0
+    total_m, total_s = divmod(int(elapsed), 60)
+    print(f"\n[SUMMARY] Pipeline time: {total_m}m {total_s:02d}s ({elapsed:.2f}s)")
     sys.exit(0 if result.all_ok else 1)
 
 
