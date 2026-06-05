@@ -274,6 +274,10 @@ _ACCESS_MAP = {
     "W1C":  "W1C", "W1S":  "W1S",
     "RW1C": "W1C", "RW1S": "W1S",  # Samsung aliases
     "RW1":  "W1C", "WC":   "W1C",
+    # ── Behavioral access modifiers ────────────────────────────────────────
+    "RWL":  "RWL",  # Write-once lock (one-time programmable / OTP)
+    "SC":   "SC",   # Self-clearing (pulse / auto-reset to 0 after write)
+    "SELFCLR": "SC", "SELF_CLR": "SC", "SELF-CLR": "SC",
 }
 
 

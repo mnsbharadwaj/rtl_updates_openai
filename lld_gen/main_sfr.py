@@ -276,64 +276,131 @@ _CONFIG_TEMPLATE = """\
 # -----------------------------------------------------------------------
 # Directories  (relative paths resolved from this config file location)
 # -----------------------------------------------------------------------
-sfr_old_dir: "./old_sfr"         # OLD SFR headers  (sfr_pmu.h, sfr_uart.h ...)
-sfr_new_dir: "./new_sfr"         # NEW SFR headers  (sfr_pmu.h, sfr_uart.h ...)
-lld_dir:     "./lld"             # Existing LLD headers (lld_pmu.h, lld_uart.h ...)
-output_dir:  "./lld_patched"     # Patched LLD files written HERE
-tests_dir:   "./tests_generated" # Generated unit test .c files written HERE
+sfr_old_dir: \"./old_sfr\"         # OLD SFR headers  (sfr_pmu.h, sfr_uart.h ...)
+sfr_new_dir: \"./new_sfr\"         # NEW SFR headers  (sfr_pmu.h, sfr_uart.h ...)
+lld_dir:     \"./lld\"             # Existing LLD headers (lld_pmu.h, lld_uart.h ...)
+output_dir:  \"./lld_patched\"     # Patched LLD files written HERE
+tests_dir:   \"./tests_generated\" # Generated unit test .c files written HERE
 
 # -----------------------------------------------------------------------
-# LLM settings
+# LLM Configuration
 # -----------------------------------------------------------------------
-no_llm:   true       # true = template fallback only (no LLM needed)
-hf_token: ""         # HuggingFace token (or set HF_TOKEN env variable)
+# ACTIVE: Qwen2.5-Coder 7B via local Ollama  (zero cost, no API key needed)
+#
+# Quick start:
+#   1. Install Ollama : https://ollama.com/download
+#   2. Pull model    : ollama pull qwen2.5-coder:7b
+#   3. Start server  : ollama serve
+#
+# To switch provider: comment the active llm: block and
+# un-comment ONE of the other provider blocks below.
+# -----------------------------------------------------------------------
+
+llm:
+  backend:       ollama                  # local Ollama (no API key needed)
+  model:         qwen2.5-coder:7b       # 7B recommended; use :1.5b for low VRAM
+  url:           http://localhost:11434  # Ollama default (change if remote)
+  temperature:   0.1                    # low = deterministic C code output
+  max_tokens:    600                    # tokens per LLD function patch
+  timeout:       120                    # seconds per call
+  max_retries:   3                      # retries on timeout/error
+  context_limit: 4096                   # max prompt chars (Qwen 7B = 8k ctx)
+
+# -----------------------------------------------------------------------
+# Other LLM providers  (un-comment ONE block to switch)
+# -----------------------------------------------------------------------
+
+# ---- Qwen via HuggingFace Inference API (no local GPU needed) ----------
+# llm:
+#   backend:     huggingface
+#   model:       Qwen/Qwen2.5-Coder-7B-Instruct
+#   api_key:     \"\"   # or set env: HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
+#   temperature: 0.1
+#   max_tokens:  600
+#   timeout:     120
+
+# ---- OpenAI  (GPT-4o, GPT-4o-mini, GPT-3.5-turbo) --------------------
+# llm:
+#   backend:     openai
+#   model:       gpt-4o-mini            # gpt-4o for best quality
+#   api_key:     \"\"   # or set env: OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
+#   temperature: 0.1
+#   max_tokens:  600
+#   timeout:     60
+
+# ---- Anthropic Claude (claude-3-5-sonnet, claude-3-haiku) -------------
+# llm:
+#   backend:     anthropic
+#   model:       claude-3-haiku-20240307   # fastest; use claude-3-5-sonnet for best
+#   api_key:     \"\"   # or set env: ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxx
+#   temperature: 0.1
+#   max_tokens:  600
+#   timeout:     60
+
+# ---- Google Gemini  (via OpenAI-compatible endpoint) ------------------
+# llm:
+#   backend:     openai_compat
+#   model:       gemini-1.5-flash        # or gemini-1.5-pro
+#   url:         https://generativelanguage.googleapis.com/v1beta/openai
+#   api_key:     \"\"   # or set env: OPENAI_API_KEY=AIzaxxxxxxxxxxxxxxx
+#   temperature: 0.1
+#   max_tokens:  600
+#   timeout:     60
+
+# ---- Azure OpenAI -----------------------------------------------------
+# llm:
+#   backend:     azure_openai
+#   model:       gpt-4o                  # your deployment name in Azure portal
+#   url:         https://<resource>.openai.azure.com/openai/deployments/gpt-4o
+#   api_key:     \"\"   # or set env: AZURE_OPENAI_KEY=xxxxxxxxxxxxxxxx
+#   api_version: \"2024-02-01\"
+#   temperature: 0.1
+#   max_tokens:  600
+
+# ---- Any OpenAI-compatible (LM Studio, vLLM, Groq, Together, etc.) ----
+# llm:
+#   backend:     openai_compat
+#   model:       meta-llama/llama-3-8b-instruct
+#   url:         https://api.groq.com/openai/v1   # or http://localhost:1234/v1
+#   api_key:     \"\"   # or set env: OPENAI_API_KEY
+#   temperature: 0.1
+#   max_tokens:  600
 
 # -----------------------------------------------------------------------
 # Git / PR settings
 # -----------------------------------------------------------------------
 no_git: true         # true = skip git add and PR_DESCRIPTION.md generation
 
-# GitHub repository URL for PR creation link in PR_DESCRIPTION.md
-# Auto-detected from git remote origin if not set here.
-# Example: https://github.com/mnsbharadwaj/rtl_updates_openai
-github_url: ""       # leave empty to auto-detect from git remote
+# GitHub/Bitbucket URL for PR link in PR_DESCRIPTION.md
+# Auto-detected from git remote origin if left empty.
+github_url: \"\"       # e.g. https://github.com/org/repo
 
 # -----------------------------------------------------------------------
-# Unit test generation mode
+# Unit test generation
 # -----------------------------------------------------------------------
-# false (default) -- fast deterministic template tests
-#   Each LLD function gets a basic test: mask/shift/RMW isolation checks.
-#   No API calls, instant generation, fully reproducible.
-#
-# true            -- LLM-generated rich unit tests (requires LLM enabled)
-#   The LLM writes tests that also cover:
-#     - Boundary values (value=0, value=max_for_field)
-#     - RMW isolation (adjacent field bits must not be touched)
-#     - Reset value check (if register has non-zero reset)
-#     - Access constraint (RO: no setter; W1C: write-1-to-clear)
-#   Falls back silently to template if LLM fails or is unavailable.
-#   Requires: no_llm: false  AND  hf_token set (or HF_TOKEN env var)
+# false -- fast deterministic template tests (no LLM, always works)
+# true  -- LLM-generated richer tests (requires llm: block above enabled)
 llm_test_gen: false
 
 # -----------------------------------------------------------------------
 # Compiler settings
 # -----------------------------------------------------------------------
-gcc: null            # Path to gcc (null = auto-search PATH)
+gcc: null            # path to gcc binary (null = auto-search PATH)
 
 # -----------------------------------------------------------------------
-# Optional: Restrict which IPs to process (comment out to process all)
+# Optional: restrict which IPs to process (comment out to process ALL)
 # -----------------------------------------------------------------------
 # ip_list:
 #   - PMU
 #   - UART
 
 # -----------------------------------------------------------------------
-# Optional: Per-IP overrides (override global settings per IP)
+# Optional: per-IP LLM overrides
 # -----------------------------------------------------------------------
 # ip_overrides:
 #   PMU:
-#     no_llm: false
-#     hf_token: "hf_your_token"
+#     llm:
+#       model: qwen2.5-coder:1.5b   # lighter model for simple IPs
 """
 
 
