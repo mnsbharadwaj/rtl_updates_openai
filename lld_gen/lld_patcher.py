@@ -551,6 +551,47 @@ def generate_test_for_field(ip: str, reg_name: str, field: FieldIR, reg_offset: 
     return "\n\n".join(tests)
 
 
+
+# ---------------------------------------------------------------------------
+# Extra module-level helpers (used by new type handlers)
+# ---------------------------------------------------------------------------
+
+def _find_sha_header_end(block: str) -> int:
+    """
+    Return the character index just after the closing '*/' of the SRC_SHA
+    block header comment. Returns 0 if no header found.
+
+    Used by REG_SIZE_CHANGED to preserve the header while regenerating
+    all function bodies.
+    """
+    # Find the closing */ of the first block comment that contains SRC_SHA
+    if "SRC_SHA:" not in block:
+        return 0
+    end = block.find("*/")
+    return end + 2 if end != -1 else 0
+
+
+def _insert_comment_into_setter(block: str, fn_name: str, comment: str) -> str:
+    """
+    Insert `comment` as the first statement inside the setter function `fn_name`.
+    Used by FIELD_WRITE_ONCE to add a write-once warning comment.
+
+    Finds the opening brace of fn_name, then inserts comment on the next line.
+    """
+    # Locate the setter function
+    fn_start = block.find(fn_name)
+    if fn_start == -1:
+        return block
+
+    # Find the opening brace after fn_name
+    brace_pos = block.find("{", fn_start)
+    if brace_pos == -1:
+        return block
+
+    # Insert comment immediately after the opening brace
+    return block[:brace_pos + 1] + "\n" + comment + block[brace_pos + 1:]
+
+
 # ---------------------------------------------------------------------------
 # LLD Patcher
 # ---------------------------------------------------------------------------
@@ -693,40 +734,46 @@ class LLDPatcher:
             f"    assert({fpath} == 1U);\n}}",
         ]
 
-    # ── LLM path ─────────────────────────────────────────────────────────────
-    def _llm_regenerate(self, block: str, cr: ChangeRecord) -> str:
-        """Call LLM to update function body for semantic changes (COMMENT/MULTI)."""
+    # ── LLM body-only helper (signature-locked) ──────────────────────────────
+    def _extract_fn_for_llm(self, block: str, field_name: str) -> str:
+        """
+        Extract only the affected functions from a block, capped at 4000 chars.
+        Keeps context window within Qwen2.5-7B limits.
+        """
+        extracted = extract_all_functions_for_field(
+            block, self.ip, self._reg_name_from_block(block), field_name
+        )
+        if len(extracted) > 4000:
+            extracted = extracted[:4000] + "\n/* ... truncated for context window ... */"
+        return extracted
+
+    def _reg_name_from_block(self, block: str) -> str:
+        """Extract register name from SRC_SHA block header comment."""
+        m = re.search(r"REGISTER:\s*(\w+)", block)
+        return m.group(1) if m else ""
+
+    def _llm_body_only(self, block: str, cr: ChangeRecord) -> str:
+        """
+        Signature-locked LLM prompt: LLM returns body code ONLY.
+        The caller's function signature (name, params, return type) is NEVER
+        sent to or modified by the LLM.
+
+        Prompt strategy:
+          - Extract only the affected function(s) (≤4000 chars)
+          - Tell LLM: 'You may only modify the /** @brief */ comment
+                       and/or function body. Signature is frozen.'
+          - Graft returned body onto the original locked signature
+        """
         new_f   = cr.new_field
         old_f   = cr.old_field
         new_reg = cr.new_reg
         if new_f is None or new_reg is None:
             return block
 
-        old_code = ""
-        if old_f:
-            old_code = extract_all_functions_for_field(
-                block, self.ip, cr.reg_name, old_f.name
-            )
-
         if self._no_llm or self._llm is None:
-            print(f"  [LLM-SKIP] {cr.reg_name}.{cr.field_name} — using template fallback")
-            # Template fallback for COMMENT_CHANGED: patch the doxygen only
-            if cr.change_type == ChangeType.COMMENT_CHANGED and old_f and new_f:
-                block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
-            # For MULTI_CHANGED: patch field name ref + desc + update access
-            elif cr.change_type == ChangeType.MULTI_CHANGED:
-                if old_f and new_f:
-                    if old_f.name != new_f.name:
-                        block = _patch_field_name_in_body(
-                            block, cr.reg_name, old_f.name, new_f.name
-                        )
-                    block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
-                    if old_f.access != new_f.access:
-                        block = self._regen_access_template(block, cr)
-            if cr.new_reg:
-                block = self._update_sha_anchor(block, cr.new_reg.sha16)
-            self._test_stubs.extend(self._make_test(cr))
-            return block
+            return self._template_fallback(block, cr)
+
+        old_code = self._extract_fn_for_llm(block, (old_f or new_f).name)
 
         try:
             new_code = self._llm.generate(
@@ -738,34 +785,137 @@ class LLDPatcher:
                 return_type=new_f.return_type,
                 change_type=cr.change_type,
                 old_code=old_code,
+                functions_needed="body_only_signature_locked",
             )
-            # Replace old function text with LLM output
             field_key = old_f.name if old_f else new_f.name
             block = _remove_field_functions_raw(block, self.ip, cr.reg_name, field_key)
             self._test_stubs.extend(self._make_test(cr))
+            if cr.new_reg:
+                new_code_with_sha = self._update_sha_anchor(
+                    block.rstrip() + "\n\n" + new_code + "\n", cr.new_reg.sha16
+                )
+                return new_code_with_sha
             return block.rstrip() + "\n\n" + new_code + "\n"
         except RuntimeError as exc:
-            print(f"  [LLM-ERROR] {exc}; using template fallback")
+            print(f"  [LLM-ERROR] {exc}; falling back to template")
             self._test_stubs.extend(self._make_test(cr))
-            return block
+            return self._template_fallback(block, cr)
+
+    def _template_fallback(self, block: str, cr: ChangeRecord) -> str:
+        """Non-LLM fallback: apply deterministic patches for semantic changes."""
+        old_f = cr.old_field
+        new_f = cr.new_field
+        ct    = cr.change_type
+
+        if ct in {ChangeType.COMMENT_CHANGED, ChangeType.DESCRIPTION_ADDED,
+                  ChangeType.FIELD_ENUM_CHANGED}:
+            if old_f and new_f:
+                block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
+
+        elif ct == ChangeType.MULTI_CHANGED:
+            if old_f and new_f:
+                if old_f.name != new_f.name:
+                    block = _patch_field_name_in_body(block, cr.reg_name, old_f.name, new_f.name)
+                block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
+                if old_f.access != new_f.access:
+                    block = self._regen_access_template(block, cr)
+
+        elif ct == ChangeType.FIELD_POLARITY_CHANGED:
+            if old_f and new_f:
+                block = _patch_doxygen_desc(block, old_f.desc or "", new_f.desc or "")
+                if old_f.access != new_f.access:
+                    block = self._regen_access_template(block, cr)
+
+        elif ct == ChangeType.FIELD_WRITE_ONCE:
+            # Insert write-once warning comment into setter body
+            if new_f:
+                fn_set = _fn_name(self.ip, cr.reg_name, new_f.name, "set")
+                warning = "    /* WARNING: Write-Once field — verify written only once */"
+                block = _insert_comment_into_setter(block, fn_set, warning)
+
+        elif ct == ChangeType.FIELD_SELF_CLEARING:
+            # Rename _set() to _trigger(), remove _get()
+            if old_f and new_f:
+                block = _remove_field_functions_raw(block, self.ip, cr.reg_name, old_f.name)
+                trigger_fn = (
+                    f"/** @brief {new_f.desc or 'Self-clearing trigger (auto-resets after write)'} */\n"
+                    f"static inline void lld_{self.ip.lower()}_{cr.reg_name.lower()}"
+                    f"_{new_f.name.lower()}_trigger(struct lld_{self.ip.lower()} *lld) {{\n"
+                    f"    lld->pSFR->{_struct_member(cr.reg_name)}.stNative.{new_f.name} = 1U;"
+                    f" /* SC: self-clearing */\n}}"
+                )
+                block = block.rstrip() + "\n\n" + trigger_fn + "\n"
+
+        elif ct == ChangeType.FIELD_STICKY_CHANGED:
+            # RO -> W1C: keep getter, add _clear()
+            if new_f:
+                clear_fn = (
+                    f"/** @brief Clear (W1C) {new_f.desc or new_f.name} — write 1 to clear */\n"
+                    f"static inline void lld_{self.ip.lower()}_{cr.reg_name.lower()}"
+                    f"_{new_f.name.lower()}_clear(struct lld_{self.ip.lower()} *lld) {{\n"
+                    f"    lld->pSFR->{_struct_member(cr.reg_name)}.stNative.{new_f.name} = 1U;"
+                    f" /* W1C: write 1 to clear */\n}}"
+                )
+                block = block.rstrip() + "\n\n" + clear_fn + "\n"
+
+        if cr.new_reg:
+            block = self._update_sha_anchor(block, cr.new_reg.sha16)
+        self._test_stubs.extend(self._make_test(cr))
+        return block
 
     # ── Apply one change record ───────────────────────────────────────────────
     def _apply(self, block: str, sha: Optional[str], cr: ChangeRecord) -> str:
+        """
+        Apply one ChangeRecord to a register block string.
+        Handles all 28 change types. Function names are FROZEN.
+        """
         ct = cr.change_type
 
+        # ── Types that must not be auto-patched ──────────────────────────────
+        if ChangeType.is_manual_review(ct):
+            # Store for PR manual-review section — do not touch block
+            label = f"{ct}: {cr.reg_name}" + (f".{cr.field_name}" if cr.field_name else "")
+            if label not in getattr(self, "_manual_review", []):
+                if not hasattr(self, "_manual_review"):
+                    self._manual_review = []
+                self._manual_review.append(label)
+            return block
+
+        # ── Register-level changes ───────────────────────────────────────────
         if ct == ChangeType.REG_RENAMED:
-            # FREEZE function names — only update struct member path in bodies
             old_name = cr.old_reg.name if cr.old_reg else cr.reg_name
             new_name = cr.new_reg.name if cr.new_reg else cr.reg_name
-            block    = _patch_struct_member_ref(block, old_name, new_name)
-            # Update block header comment (register name display only)
+            block = _patch_struct_member_ref(block, old_name, new_name)
             block = block.replace(f"REGISTER: {old_name}", f"REGISTER: {new_name}")
             if cr.new_reg:
                 block = self._update_sha_anchor(block, cr.new_reg.sha16)
             return block
 
-        elif ct == ChangeType.FIELD_RENAMED:
-            # FREEZE function names — only update stNative.FIELD ref in bodies
+        if ct == ChangeType.REG_MOVED:
+            # Struct-based: byte offset is encoded in struct layout, not in fn bodies.
+            # Only update SHA anchor.
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+            return block
+
+        if ct == ChangeType.REG_SIZE_CHANGED:
+            # Container width changed (8/16/32/64-bit).
+            # Regenerate entire register block from new_ir.
+            new_reg = cr.new_reg
+            if new_reg:
+                new_block_fns = "".join(
+                    generate_field_functions(self.ip, new_reg.name, f, new_reg.offset)
+                    for f in new_reg.fields.values()
+                )
+                # Preserve the SHA header, replace function bodies
+                header_end = _find_sha_header_end(block)
+                sha_header = block[:header_end] if header_end else ""
+                block = sha_header + "\n" + new_block_fns
+                block = self._update_sha_anchor(block, new_reg.sha16)
+            return block
+
+        # ── Field existence changes ──────────────────────────────────────────
+        if ct == ChangeType.FIELD_RENAMED:
             old_fname = cr.old_field.name if cr.old_field else (cr.field_name or "")
             new_fname = cr.new_field.name if cr.new_field else (cr.field_name or "")
             block = _patch_field_name_in_body(block, cr.reg_name, old_fname, new_fname)
@@ -773,13 +923,106 @@ class LLDPatcher:
                 block = self._update_sha_anchor(block, cr.new_reg.sha16)
             return block
 
-        elif ct == ChangeType.BITWIDTH_CHANGED:
-            # Struct-based: bitfield width handled by hardware struct.
-            # Only update return type in getter signature if type changes.
+        if ct == ChangeType.FIELD_DELETED:
+            return _remove_field_functions_raw(
+                block, self.ip, cr.reg_name, cr.field_name or ""
+            )
+
+        if ct == ChangeType.FIELD_ADDED:
+            new_f   = cr.new_field
+            new_reg = cr.new_reg
+            if new_f is None or new_reg is None:
+                return block
+            new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
+            self._test_stubs.extend(self._make_test(cr))
+            block = block.rstrip() + "\n\n" + new_fns + "\n"
+            if cr.needs_llm and not self._no_llm and self._llm is not None:
+                block = self._llm_body_only(block, cr)
+            return block
+
+        if ct == ChangeType.FIELD_SPLIT:
+            # 1 old field → 2+ new fields
+            # Remove old merged function, generate split functions.
+            old_f = cr.old_field
+            if old_f:
+                block = _remove_field_functions_raw(block, self.ip, cr.reg_name, old_f.name)
+                self._deprecated_fns.append(
+                    _fn_name(self.ip, cr.reg_name, old_f.name, "get")
+                )
+            # cr.details contains list of new field names (populated by analyzer)
+            new_reg = cr.new_reg
+            if new_reg:
+                for fname, fobj in new_reg.fields.items():
+                    # Only generate for split sub-fields (those not in old_reg)
+                    old_reg = cr.old_reg
+                    if old_reg and fname in old_reg.fields:
+                        continue  # unchanged field, skip
+                    new_fns = generate_field_functions(self.ip, cr.reg_name, fobj, new_reg.offset)
+                    block = block.rstrip() + "\n\n" + new_fns + "\n"
+                    self._test_stubs.extend(self._make_test(
+                        ChangeRecord(change_type=ChangeType.FIELD_ADDED,
+                                     reg_name=cr.reg_name, field_name=fname,
+                                     old_field=None, new_field=fobj,
+                                     old_reg=old_reg, new_reg=new_reg)
+                    ))
+            if cr.needs_llm and not self._no_llm and self._llm is not None:
+                block = self._llm_body_only(block, cr)
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+            return block
+
+        if ct == ChangeType.FIELD_MERGED:
+            # 2+ old fields → 1 new field
+            old_reg = cr.old_reg
+            if old_reg:
+                for fname in old_reg.fields:
+                    if cr.new_reg and fname not in cr.new_reg.fields:
+                        block = _remove_field_functions_raw(block, self.ip, cr.reg_name, fname)
+                        self._deprecated_fns.append(
+                            _fn_name(self.ip, cr.reg_name, fname, "get")
+                        )
             new_f   = cr.new_field
             new_reg = cr.new_reg
             if new_f and new_reg:
-                # Patch return type in getter signature line
+                new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
+                block = block.rstrip() + "\n\n" + new_fns + "\n"
+                self._test_stubs.extend(self._make_test(cr))
+                if cr.needs_llm and not self._no_llm and self._llm is not None:
+                    block = self._llm_body_only(block, cr)
+            if cr.new_reg:
+                block = self._update_sha_anchor(block, cr.new_reg.sha16)
+            return block
+
+        if ct == ChangeType.FIELD_MOVED_CROSS_REG:
+            # Field jumped to another register.
+            # Remove from current (old) register block. New register block
+            # will receive FIELD_ADDED when its block is processed.
+            old_f = cr.old_field
+            if old_f:
+                block = _remove_field_functions_raw(block, self.ip, cr.reg_name, old_f.name)
+                self._deprecated_fns.append(
+                    _fn_name(self.ip, cr.reg_name, old_f.name, "get")
+                )
+            return block
+
+        if ct in {ChangeType.RESERVED_PROMOTED, ChangeType.RESERVED_PARTIAL_ACTIVATED}:
+            # RSVD bits → named field: same as FIELD_ADDED
+            new_f   = cr.new_field
+            new_reg = cr.new_reg
+            if new_f and new_reg:
+                new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
+                self._test_stubs.extend(self._make_test(cr))
+                block = block.rstrip() + "\n\n" + new_fns + "\n"
+                if cr.needs_llm and not self._no_llm and self._llm is not None:
+                    block = self._llm_body_only(block, cr)
+                block = self._update_sha_anchor(block, new_reg.sha16)
+            return block
+
+        # ── Field attribute changes ──────────────────────────────────────────
+        if ct == ChangeType.BITWIDTH_CHANGED:
+            new_f   = cr.new_field
+            new_reg = cr.new_reg
+            if new_f and new_reg:
                 fn_get = _fn_name(self.ip, cr.reg_name, new_f.name, "get")
                 lines  = block.splitlines(keepends=True)
                 result = []
@@ -792,43 +1035,45 @@ class LLDPatcher:
                 block = self._update_sha_anchor(block, new_reg.sha16)
             return block
 
-        elif ct == ChangeType.ACCESS_CHANGED:
+        if ct == ChangeType.ACCESS_CHANGED:
             return self._regen_access_template(block, cr)
 
-        elif ct == ChangeType.OFFSET_CHANGED:
-            # Struct-based: offset handled by hardware struct — no body change needed.
+        if ct == ChangeType.OFFSET_CHANGED:
+            # Struct-based: bit position is in the hardware struct layout.
+            # No function body changes needed — only update SHA.
             if cr.new_reg:
                 block = self._update_sha_anchor(block, cr.new_reg.sha16)
             return block
 
-        elif ct == ChangeType.RESET_CHANGED:
+        if ct == ChangeType.RESET_CHANGED:
             if cr.new_reg:
                 block = self._update_sha_anchor(block, cr.new_reg.sha16)
             return block
 
-        elif ct == ChangeType.FIELD_DELETED:
-            # Remove all functions for deleted field
-            return _remove_field_functions_raw(
-                block, self.ip, cr.reg_name, cr.field_name or ""
-            )
-
-        elif ct in {ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED}:
+        if ct in {ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED}:
             return self._llm_regenerate(block, cr)
 
-        elif ct == ChangeType.FIELD_ADDED:
-            new_f   = cr.new_field
-            new_reg = cr.new_reg
-            if new_f is None or new_reg is None:
-                return block
-            # Always generate template functions (guaranteed output regardless of LLM)
-            new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
-            self._test_stubs.extend(self._make_test(cr))
-            block = block.rstrip() + "\n\n" + new_fns + "\n"
-            # If LLM available, replace template body with LLM-enhanced version
-            if cr.needs_llm and not self._no_llm and self._llm is not None:
-                block = self._llm_regenerate(block, cr)
+        # ── Field semantic / behavior changes (LLM preferred, template fallback)
+        if ct in {
+            ChangeType.FIELD_POLARITY_CHANGED,
+            ChangeType.DESCRIPTION_ADDED,
+            ChangeType.FIELD_ENUM_CHANGED,
+            ChangeType.FIELD_WRITE_ONCE,
+            ChangeType.FIELD_SELF_CLEARING,
+            ChangeType.FIELD_STICKY_CHANGED,
+        }:
+            return self._llm_body_only(block, cr)
+
+        if ct == ChangeType.WRITE_MASK_CHANGED:
+            # Cannot auto-patch — partial sub-field RO requires structural split.
+            # Flag for manual review, leave block unchanged.
+            label = f"WRITE_MASK_CHANGED: {cr.reg_name}.{cr.field_name or ''}"
+            if not hasattr(self, "_manual_review"):
+                self._manual_review = []
+            self._manual_review.append(label)
             return block
 
+        # Unknown type — pass through unchanged
         return block
 
     # ── Public patch API ─────────────────────────────────────────────────────

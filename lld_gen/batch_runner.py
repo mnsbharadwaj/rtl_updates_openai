@@ -19,12 +19,13 @@ from typing import List, Optional
 
 from lld_gen.config import PatcherConfig, IPJob, load_config, discover_jobs
 from lld_gen.sfr_diff_analyzer import (
-    classify_sfr_diff, summarize_changes, SfrParser,
+    classify_sfr_diff, summarize_changes, SfrParser, ChangeType,
 )
 from lld_gen.lld_patcher import LLDPatcher
 from lld_gen.llm_client import LLMClient
 from lld_gen.compile_check import run_compile_check
 from lld_gen.pr_stage import stage_pr
+from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
 
 
 # ---------------------------------------------------------------------------
@@ -129,26 +130,49 @@ class BatchRunner:
         hf_token = str(overrides.get("hf_token", self.cfg.hf_token) or "")
         no_git   = bool(overrides.get("no_git",  self.cfg.no_git))
 
+        # v3 flags (with safe fallbacks for old PatcherConfig)
+        max_llm_retries  = getattr(self.cfg, "max_llm_retries",  5)
+        cross_lld_scan   = getattr(self.cfg, "cross_lld_scan",   True)
+        lld_search_depth = getattr(self.cfg, "lld_search_depth", 3)
+        atomic_commits   = getattr(self.cfg, "atomic_commits",   True)
+        commit_prefix    = getattr(self.cfg, "commit_prefix",    "feat(lld)")
+        skip_reg_added   = getattr(self.cfg, "skip_reg_added",   True)
+        skip_reg_deleted = getattr(self.cfg, "skip_reg_deleted", True)
+
         try:
             # Step 1: Classify changes
-            print(f"\n  [1/4] Diff & Classify {job.ip}...")
-            changes = classify_sfr_diff(job.old_sfr, job.new_sfr, ip=job.ip)
-            result.n_changes = len(changes)
-            print(f"  {summarize_changes(changes).replace(chr(10), chr(10) + '  ')}")
+            print(f"\n  [1/5] Diff & Classify {job.ip}...")
+            all_changes = classify_sfr_diff(job.old_sfr, job.new_sfr, ip=job.ip)
+            result.n_changes = len(all_changes)
+            print(f"  {summarize_changes(all_changes).replace(chr(10), chr(10) + '  ')}")
 
-            if not changes:
+            if not all_changes:
                 print(f"  [SKIP] No changes detected for {job.ip} -- lld.h is up to date.")
-                # Still copy to output_dir so user gets the file
                 shutil.copy2(job.lld, job.out_lld)
                 result.status = "SKIP"
                 return result
 
-            # Step 2: Copy LLD to output_dir first, then patch in-place there
-            print(f"\n  [2/4] Patch {job.ip} LLD...")
-            shutil.copy2(job.lld, job.out_lld)   # copy original to output
+            # Separate manual-review vs auto-patchable changes
+            manual_crs = [cr for cr in all_changes
+                          if ChangeType.is_manual_review(cr.change_type)]
+            auto_crs   = [cr for cr in all_changes
+                          if not ChangeType.is_manual_review(cr.change_type)]
 
-            parser  = SfrParser(ip=job.ip)
-            new_ir  = parser.parse_file(job.new_sfr)
+            manual_items = [
+                f"{cr.change_type}: {cr.reg_name}"
+                + (f".{cr.field_name}" if cr.field_name else "")
+                for cr in manual_crs
+            ]
+            if manual_items:
+                print(f"  [MANUAL-REVIEW] {len(manual_items)} items skipped: {', '.join(manual_items[:3])}"
+                      + ("..." if len(manual_items) > 3 else ""))
+
+            # Step 2: Copy LLD to output_dir, patch in-place
+            print(f"\n  [2/5] Patch {job.ip} LLD ({len(auto_crs)} auto-patchable changes)...")
+            shutil.copy2(job.lld, job.out_lld)
+
+            parser       = SfrParser(ip=job.ip)
+            new_ir       = parser.parse_file(job.new_sfr)
             ollama_model = str(overrides.get("ollama_model", self.cfg.ollama_model) or "")
             llm = LLMClient(
                 hf_token     = hf_token,
@@ -156,16 +180,15 @@ class BatchRunner:
             ) if not no_llm else LLMClient(hf_token="", ollama_model="")
             patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
 
-            # Patch the COPY in output_dir (not the original)
             patcher.patch(
-                lld_path=job.out_lld,
-                changes=changes,
-                new_ir=new_ir,
-                out_path=job.out_lld,        # <- write patched file here
+                lld_path = job.out_lld,
+                changes  = auto_crs,       # only auto-patchable changes
+                new_ir   = new_ir,
+                out_path = job.out_lld,
             )
             print(f"  Patched LLD written -> {job.out_lld}")
 
-            # Write test file to tests_dir (full coverage: all fields in new_ir)
+            # Write test file
             test_file    = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
             lld_text     = job.out_lld.read_text(encoding="utf-8") if job.out_lld.exists() else ""
             llm_test_gen = bool(self.cfg.llm_test_gen)
@@ -173,41 +196,96 @@ class BatchRunner:
                 out_path   = test_file,
                 sfr_new    = job.new_sfr.name,
                 lld_new    = job.out_lld.name,
-                new_ir     = new_ir,                           # ensures 100% function coverage
-                llm_client = llm if llm_test_gen else None,    # LLM only if config says so
-                lld_text   = lld_text,                         # reference impl for LLM prompt
+                new_ir     = new_ir,
+                llm_client = llm if llm_test_gen else None,
+                lld_text   = lld_text,
             )
             mode_tag = "[LLM+Template fallback]" if llm_test_gen else "[Template]"
             print(f"  Test file written  -> {test_file}  {mode_tag}")
 
             # Step 3: Compile check
-            print(f"\n  [3/4] Compile-check {job.ip}...")
+            print(f"\n  [3/5] Compile-check {job.ip}...")
             compile_result = run_compile_check(
-                test_file=test_file,
-                sfr_new=job.new_sfr,
-                lld_file=job.out_lld,
-                llm_client=llm,
-                gcc_exe=self.cfg.gcc,
+                test_file  = test_file,
+                sfr_new    = job.new_sfr,
+                lld_file   = job.out_lld,
+                llm_client = llm,
+                gcc_exe    = self.cfg.gcc,
             )
             result.compile_ok = compile_result.success
             if compile_result.success:
                 print(f"  [OK] Compile passed for {job.ip}")
             else:
-                print(f"  [WARN] Compile check skipped/failed for {job.ip} (gcc not found or errors)")
+                print(f"  [WARN] Compile failed for {job.ip} "
+                      f"(needs_review={compile_result.needs_review})")
 
-            # Step 4: Stage PR
-            print(f"\n  [4/4] Stage PR for {job.ip}...")
+            # Step 4: Cross-LLD reference scan
+            cross_ref_md = ""
+            if cross_lld_scan and self.cfg.lld_dir.exists():
+                print(f"\n  [4/5] Cross-LLD scan for {job.ip}...")
+                # Build function names of changed fields to scan for
+                changed_fn_names = []
+                for cr in auto_crs:
+                    if cr.field_name:
+                        for verb in ("get", "set", "clear", "set1", "trigger"):
+                            changed_fn_names.append(
+                                f"lld_{job.ip.lower()}_"
+                                f"{cr.reg_name.lower()}_{cr.field_name.lower()}_{verb}"
+                            )
+                if changed_fn_names:
+                    cross_refs = find_cross_refs(
+                        ip           = job.ip,
+                        changed_fns  = changed_fn_names,
+                        lld_dir      = self.cfg.lld_dir,
+                        search_depth = lld_search_depth,
+                    )
+                    cross_ref_md = format_cross_ref_report(cross_refs)
+                    if cross_refs:
+                        print(f"  [CROSS-REF] Found callers in "
+                              f"{len(cross_refs)} file(s) — flagged in PR description")
+            else:
+                print(f"\n  [4/5] Cross-LLD scan skipped")
+
+            # Step 5: Stage PR
+            print(f"\n  [5/5] Stage PR for {job.ip}...")
+            all_manual = manual_items + (compile_result.needs_review or [])
             stage_pr(
-                ip=job.ip,
-                changes=changes,
-                compile_result=compile_result,
-                lld_file=job.out_lld,
-                test_file=test_file,
-                sfr_new=job.new_sfr,
-                deprecated_fns=patcher.get_deprecated_fns(),
-                no_git=no_git,
-                github_url=self.cfg.github_url,
+                ip                  = job.ip,
+                changes             = all_changes,
+                compile_result      = compile_result,
+                lld_file            = job.out_lld,
+                test_file           = test_file,
+                sfr_new             = job.new_sfr,
+                deprecated_fns      = patcher.get_deprecated_fns(),
+                no_git              = no_git,
+                github_url          = self.cfg.github_url,
+                manual_review_items = all_manual if all_manual else None,
+                cross_ref_report    = cross_ref_md,
             )
+
+            # Atomic git commit: one commit per SFR file changed
+            if not no_git and atomic_commits:
+                import subprocess as _sp
+                commit_files = [str(job.out_lld), str(test_file)]
+                pr_desc_path = job.out_lld.parent / "PR_DESCRIPTION.md"
+                if pr_desc_path.exists():
+                    commit_files.append(str(pr_desc_path))
+                _sp.run(["git", "add"] + commit_files, capture_output=True)
+                commit_msg = (
+                    f"{commit_prefix}({job.ip.lower()}): patch LLD for {job.new_sfr.name}\n\n"
+                    f"Changes: {len(all_changes)} total "
+                    f"({len(auto_crs)} auto, {len(manual_crs)} manual)\n"
+                    f"Compile: {'OK' if compile_result.success else 'NEEDS_REVIEW'}\n"
+                )
+                rc = _sp.run(
+                    ["git", "commit", "-m", commit_msg],
+                    capture_output=True, text=True
+                )
+                if rc.returncode == 0:
+                    sha = rc.stdout.strip().split("[")[-1].split(" ")[0] if "[" in rc.stdout else ""
+                    print(f"  [GIT] Committed {job.ip}: {sha}")
+                else:
+                    print(f"  [GIT-WARN] Commit skipped: {rc.stderr.strip()[:80]}")
 
             result.status = "OK"
 

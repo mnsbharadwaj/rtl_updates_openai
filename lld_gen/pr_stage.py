@@ -157,15 +157,17 @@ def _make_pr_section(github_url: str, ip: str, branch: str = "") -> str:
 
 
 def build_pr_description(
-    ip:              str,
-    changes:         List[ChangeRecord],
-    compile_result:  CompileResult,
-    lld_file:        str | Path,
-    test_file:       str | Path,
-    added_fns:       Optional[List[str]] = None,
-    removed_fns:     Optional[List[str]] = None,
-    deprecated_fns:  Optional[List[str]] = None,
-    github_url:      str = "",
+    ip:                  str,
+    changes:             List[ChangeRecord],
+    compile_result:      CompileResult,
+    lld_file:            "str | Path",
+    test_file:           "str | Path",
+    added_fns:           Optional[List[str]] = None,
+    removed_fns:         Optional[List[str]] = None,
+    deprecated_fns:      Optional[List[str]] = None,
+    github_url:          str = "",
+    manual_review_items: Optional[List[str]] = None,
+    cross_ref_report:    str = "",
 ) -> str:
     """Build the PR_DESCRIPTION.md content."""
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -205,6 +207,33 @@ def build_pr_description(
     if not checklist_items:
         checklist_items = ["- [x] All functions pass gcc compile check"]
 
+    # Manual review items (REG_ADDED/DELETED, ARRAY, CLUSTER, etc.)
+    manual_section = ""
+    if manual_review_items:
+        manual_lines = [
+            "## ⚠ MANUAL REVIEW REQUIRED",
+            "",
+            "These changes were **not auto-patched** — engineer action needed:",
+            "",
+            "| Change Type | Register/Field | Action Required |",
+            "|-------------|----------------|----------------|",
+        ]
+        for item in manual_review_items:
+            # item format: "CHANGE_TYPE: REG.FIELD" or "CHANGE_TYPE: REG"
+            parts = item.split(":", 1)
+            ctype = parts[0].strip() if parts else item
+            target = parts[1].strip() if len(parts) > 1 else "-"
+            action = {
+                "REG_ADDED":         "Write new `lld_*` functions from template",
+                "REG_DELETED":       "Remove or deprecate `lld_*` functions",
+                "REG_ARRAY_CHANGED": "Add `ch_idx` parameter to all related functions",
+                "REG_CLUSTER_CHANGED": "Restructure access path for all related functions",
+                "WRITE_MASK_CHANGED": "Split field or add sub-field write mask",
+            }.get(ctype, "Review and manually patch")
+            manual_lines.append(f"| `{ctype}` | `{target}` | {action} |")
+        manual_section = "\n".join(manual_lines)
+
+
     # Deprecated functions section
     if deprecated_fns:
         dep_lines = [
@@ -228,7 +257,7 @@ def build_pr_description(
     gh_url     = _get_github_url(github_url)
     pr_section = _make_pr_section(gh_url, ip)
 
-    return _PR_TEMPLATE.format(
+    result = _PR_TEMPLATE.format(
         ip=ip.upper(),
         date=date,
         rows="\n".join(rows),
@@ -242,36 +271,55 @@ def build_pr_description(
         github_pr_section=pr_section,
     )
 
+    if manual_section:
+        result += "\n\n" + manual_section
+    if cross_ref_report:
+        result += "\n\n" + cross_ref_report
+
+    return result
+
 
 def stage_pr(
-    ip:              str,
-    changes:         List[ChangeRecord],
-    compile_result:  CompileResult,
-    lld_file:        str | Path,
-    test_file:       str | Path,
-    sfr_new:         str | Path,
-    out_dir:         Optional[str | Path] = None,
-    added_fns:       Optional[List[str]] = None,
-    removed_fns:     Optional[List[str]] = None,
-    deprecated_fns:  Optional[List[str]] = None,
-    no_git:          bool = False,
-    github_url:      str = "",
+    ip:                  str,
+    changes:             List[ChangeRecord],
+    compile_result:      CompileResult,
+    lld_file:            "str | Path",
+    test_file:           "str | Path",
+    sfr_new:             "str | Path",
+    out_dir:             Optional["str | Path"] = None,
+    added_fns:           Optional[List[str]] = None,
+    removed_fns:         Optional[List[str]] = None,
+    deprecated_fns:      Optional[List[str]] = None,
+    no_git:              bool = False,
+    github_url:          str = "",
+    manual_review_items: Optional[List[str]] = None,
+    cross_ref_report:    str = "",
+    bitbucket_token:     str = "",
+    pr_from_branch:      str = "",
+    pr_to_branch:        str = "",
 ) -> Path:
     """
     Generate PR_DESCRIPTION.md and git add all changed files.
+    Optionally create a Bitbucket PR via REST API.
 
     Args:
-        ip:             Peripheral IP name
-        changes:        Classified change list
-        compile_result: Result from run_compile_check()
-        lld_file:       Path to patched lld.h
-        test_file:      Path to test_lld_generated.c
-        sfr_new:        Path to new sfr.h
-        out_dir:        Directory for PR_DESCRIPTION.md; defaults to lld_file parent
-        added_fns:      List of newly generated function names
-        removed_fns:    List of removed function names
-        no_git:         If True, skip git add
-        github_url:     GitHub repo URL (auto-detected from git remote if empty)
+        ip:                  Peripheral IP name
+        changes:             Classified change list
+        compile_result:      Result from run_compile_check()
+        lld_file:            Path to patched lld.h
+        test_file:           Path to test_lld_generated.c
+        sfr_new:             Path to new sfr.h
+        out_dir:             Directory for PR_DESCRIPTION.md
+        added_fns:           Newly generated function names
+        removed_fns:         Removed function names
+        deprecated_fns:      Deprecated function names
+        no_git:              If True, skip git add
+        github_url:          GitHub/Bitbucket repo URL
+        manual_review_items: Items flagged for manual review
+        cross_ref_report:    Markdown cross-LLD reference table
+        bitbucket_token:     Bearer token for Bitbucket PR API
+        pr_from_branch:      Source branch for PR (auto-detected if empty)
+        pr_to_branch:        Target branch for PR
 
     Returns:
         Path to PR_DESCRIPTION.md
@@ -289,6 +337,8 @@ def stage_pr(
         added_fns=added_fns, removed_fns=removed_fns,
         deprecated_fns=deprecated_fns,
         github_url=gh_url,
+        manual_review_items=manual_review_items,
+        cross_ref_report=cross_ref_report,
     )
 
     pr_path = out_dir / "PR_DESCRIPTION.md"
@@ -296,8 +346,7 @@ def stage_pr(
     print(f"  [PR] PR_DESCRIPTION.md -> {pr_path}")
 
     if gh_url:
-        print(f"  [PR] GitHub repo : {gh_url}")
-        # Print the direct PR creation URL
+        print(f"  [PR] Repo         : {gh_url}")
         try:
             r = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -306,7 +355,7 @@ def stage_pr(
             branch = r.stdout.strip() or "main"
         except Exception:
             branch = "main"
-        print(f"  [PR] Create PR   : {gh_url}/compare/{branch}?expand=1")
+        print(f"  [PR] Create PR    : {gh_url}/compare/{branch}?expand=1")
 
     if not no_git:
         files_to_stage = [lld_file, test_file, sfr_new, pr_path]
