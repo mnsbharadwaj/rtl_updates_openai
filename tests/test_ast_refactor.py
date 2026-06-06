@@ -103,3 +103,99 @@ void sync_regs(struct lld_pmu *lld) {
         assert "stPMU_CTRL" in updated_text
         assert "stPMU_CON" not in updated_text
         assert "stPMU_CTRL.stNative.DMA_EN = lld->pSFR->stPMU_CTRL.stNative.DMA_PASS" in updated_text
+
+
+def _make_clk_reg_rename_cr():
+    return ChangeRecord(
+        change_type = ChangeType.REG_RENAMED,
+        reg_name    = "PLL_CON",
+        field_name  = None,
+        old_reg     = RegisterIR("PLL_CON", 0, {}),
+        new_reg     = RegisterIR("PLL_CTRL", 0, {}),
+        needs_llm   = False,
+        details     = []
+    )
+
+
+def test_ast_multi_sfr_cross_lld_refactoring():
+    """
+    Verify a scenario where functions in LLD files reference multiple SFR registers
+    belonging to different IPs. Renaming a register in one IP must refactor references
+    in both its own LLD file and other IP LLD files.
+    """
+    # 1. PMU LLD contains a function accessing its own PMU_CON and CLK's PLL_CON
+    pmu_lld_code = """
+#include <stdint.h>
+struct lld_pmu { pSFR_PMU pSFR; };
+struct lld_clk { pSFR_CLK pSFR; };
+
+static inline void lld_pmu_sync_with_clk(struct lld_pmu *lld, struct lld_clk *clk) {
+    // 1. Access own register PMU_CON
+    lld->pSFR->stPMU_CON.stNative.DMA_EN = 1;
+    // 2. Access other IP's register PLL_CON
+    clk->pSFR->stPLL_CON.stNative.PLL_EN = 1;
+}
+"""
+
+    # 2. CLK LLD contains a function accessing its own PLL_CON and PMU's PMU_CON
+    clk_lld_code = """
+#include <stdint.h>
+struct lld_clk { pSFR_CLK pSFR; };
+struct lld_pmu { pSFR_PMU pSFR; };
+
+static inline void lld_clk_check_pmu(struct lld_clk *clk, struct lld_pmu *lld) {
+    // 1. Access own register PLL_CON
+    clk->pSFR->stPLL_CON.stNative.PLL_EN = 0;
+    // 2. Access other IP's register PMU_CON
+    lld->pSFR->stPMU_CON.stNative.DMA_PASS = 1;
+}
+"""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pmu_path = Path(tmpdir) / "lld_pmu.c"
+        clk_path = Path(tmpdir) / "lld_clk.c"
+        
+        pmu_path.write_text(pmu_lld_code, encoding="utf-8")
+        clk_path.write_text(clk_lld_code, encoding="utf-8")
+        
+        # Define types to avoid parsing errors
+        custom_types = {"struct lld_pmu", "struct lld_clk", "pSFR_PMU", "pSFR_CLK"}
+        
+        pmu_changes = [_make_reg_rename_cr()]
+        clk_changes = [_make_clk_reg_rename_cr()]
+        
+        # Step A: Apply PMU changes (PMU_CON -> PMU_CTRL) to BOTH LLD files
+        applied_pmu_own = refactor_file(pmu_path, pmu_changes, custom_types)
+        applied_pmu_other = refactor_file(clk_path, pmu_changes, custom_types)
+        
+        # Verify PMU_CON was renamed in both files
+        assert len(applied_pmu_own) == 1
+        assert applied_pmu_own[0] == (8, "stPMU_CON", "stPMU_CTRL")
+        
+        assert len(applied_pmu_other) == 1
+        assert applied_pmu_other[0] == (10, "stPMU_CON", "stPMU_CTRL")
+        
+        # Step B: Apply CLK changes (PLL_CON -> PLL_CTRL) to BOTH LLD files
+        applied_clk_other = refactor_file(pmu_path, clk_changes, custom_types)
+        applied_clk_own = refactor_file(clk_path, clk_changes, custom_types)
+        
+        # Verify PLL_CON was renamed in both files
+        assert len(applied_clk_other) == 1
+        assert applied_clk_other[0] == (10, "stPLL_CON", "stPLL_CTRL")
+        
+        assert len(applied_clk_own) == 1
+        assert applied_clk_own[0] == (8, "stPLL_CON", "stPLL_CTRL")
+        
+        # Verify final contents
+        pmu_text = pmu_path.read_text(encoding="utf-8")
+        assert "stPMU_CTRL" in pmu_text
+        assert "stPMU_CON" not in pmu_text
+        assert "stPLL_CTRL" in pmu_text
+        assert "stPLL_CON" not in pmu_text
+        
+        clk_text = clk_path.read_text(encoding="utf-8")
+        assert "stPMU_CTRL" in clk_text
+        assert "stPMU_CON" not in clk_text
+        assert "stPLL_CTRL" in clk_text
+        assert "stPLL_CON" not in clk_text
+

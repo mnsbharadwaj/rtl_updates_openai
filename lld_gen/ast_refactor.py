@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 from pycparser import c_parser, c_ast
+from pycparser.c_parser import _TokenStream
 from lld_gen.sfr_diff_analyzer import ChangeRecord, ChangeType
 
 logger = logging.getLogger(__name__)
@@ -28,20 +29,32 @@ STANDARD_TYPEDEFS = {
 class CustomCParser(c_parser.CParser):
     """
     Subclass of pycparser CParser that automatically registers a set of type names
-    in the lexer symbol table upon reset, preventing syntax errors when parsing.
+    in the lexer symbol table, preventing syntax errors when parsing.
     """
     def __init__(self, typedefs: Set[str] | None = None):
         super().__init__()
         self.custom_typedefs = typedefs or set()
 
-    def _reset(self, *args, **kwargs):
-        super()._reset(*args, **kwargs)
+    def parse(self, text: str, filename: str = "", debug: bool = False) -> c_ast.FileAST:
+        # Initialize scope stack
+        self._scope_stack = [dict()]
+        
         # Register standard typedefs
         for t in STANDARD_TYPEDEFS:
             self._add_typedef_name(t, None)
-        # Register custom typedefs (e.g. SFR union types)
+        # Register custom typedefs
         for t in self.custom_typedefs:
             self._add_typedef_name(t, None)
+            
+        # Initialize input and token stream
+        self.clex.input(text, filename)
+        self._tokens = _TokenStream(self.clex)
+
+        ast = self._parse_translation_unit_or_empty()
+        tok = self._peek()
+        if tok is not None:
+            self._parse_error(f"before: {tok.value}", self._tok_coord(tok))
+        return ast
 
 
 def get_struct_ref_path(node: c_ast.StructRef) -> List[str]:
