@@ -40,12 +40,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # LLD function generation system prompt (struct-based, backend-agnostic)
@@ -318,11 +321,11 @@ class LLMClient:
         self._backend_fn = self._resolve_backend()
 
         if self.available:
-            print(f"[LLM] Backend : {cfg.backend.upper()}")
-            print(f"[LLM] Model   : {cfg.model or '(auto)'}")
-            print(f"[LLM] Endpoint: {cfg.base_url or '(default)'}")
+            logger.info("[LLM] Backend : %s", cfg.backend.upper())
+            logger.info("[LLM] Model   : %s", cfg.model or '(auto)')
+            logger.info("[LLM] Endpoint: %s", cfg.base_url or '(default)')
         else:
-            print(f"[LLM] No LLM backend active (backend='{cfg.backend}', no_llm or missing key)")
+            logger.info("[LLM] No LLM backend active (backend='%s', no_llm or missing key)", cfg.backend)
 
     # ── Backend resolution ────────────────────────────────────────────────────
     def _resolve_backend(self):
@@ -342,7 +345,7 @@ class LLMClient:
             return self._call_hf if self.cfg.api_key else None
         if b == "openai_compat":
             return self._call_openai_compat if self.cfg.base_url else None
-        print(f"[LLM] Unknown backend '{b}' — LLM disabled")
+        logger.warning("[LLM] Unknown backend '%s' -- LLM disabled", b)
         return None
 
     def _verify_ollama(self):
@@ -363,10 +366,10 @@ class LLMClient:
                 if matched:
                     self.cfg.model = matched
                     return self._call_ollama
-                print(f"[LLM] Ollama: model '{self.cfg.model}' not found. "
-                      f"Available: {models}")
+                logger.warning("[LLM] Ollama: model '%s' not found. Available: %s",
+                               self.cfg.model, models)
         except Exception as exc:
-            print(f"[LLM] Ollama probe failed: {exc}")
+            logger.warning("[LLM] Ollama probe failed: %s", exc)
         return None
 
     @property
@@ -398,8 +401,8 @@ class LLMClient:
                 last_exc = exc
                 if attempt < self.cfg.max_retries - 1:
                     wait = 2 ** attempt
-                    print(f"[LLM] Retry {attempt+1}/{self.cfg.max_retries} "
-                          f"in {wait}s ({exc})")
+                    logger.warning("[LLM] Retry %d/%d in %ds (%s)",
+                                   attempt + 1, self.cfg.max_retries, wait, exc)
                     time.sleep(wait)
         raise RuntimeError(f"LLM call failed after {self.cfg.max_retries} retries: {last_exc}")
 
@@ -582,7 +585,7 @@ class LLMClient:
         key    = _cache_key(reg_name, field_name, change_type, desc)
         cached = self._from_cache(key)
         if cached is not None:
-            print(f"[LLM] Cache hit: {reg_name}.{field_name} ({change_type})")
+            logger.debug("[LLM] Cache hit: %s.%s (%s)", reg_name, field_name, change_type)
             return cached
 
         if not self.available:
@@ -618,7 +621,7 @@ class LLMClient:
             functions_needed=functions_needed,
         )
 
-        print(f"[LLM-{self.cfg.backend.upper()}] {reg_name}.{field_name} ({change_type}) …")
+        logger.info("[LLM-%s] %s.%s (%s) ...", self.cfg.backend.upper(), reg_name, field_name, change_type)
         code = _strip_fences(self._call(system, user, self.cfg.max_tokens))
         if code:
             self._to_cache(key, code)
@@ -666,7 +669,7 @@ class LLMClient:
         key    = _cache_key(reg_name, field_name, f"TEST_{access}", desc)
         cached = self._from_cache(key)
         if cached is not None:
-            print(f"[LLM-TEST] Cache hit: {reg_name}.{field_name}")
+            logger.debug("[LLM-TEST] Cache hit: %s.%s", reg_name, field_name)
             return cached
 
         if not self.available:
@@ -688,14 +691,14 @@ class LLMClient:
             impl=impl or "(not available — generate from description)",
         )
 
-        print(f"[LLM-TEST-{self.cfg.backend.upper()}] {reg_name}.{field_name} ({access}) …")
+        logger.info("[LLM-TEST-%s] %s.%s (%s) ...", self.cfg.backend.upper(), reg_name, field_name, access)
         try:
             code = _strip_fences(self._call(system, user, self.cfg.max_tokens))
             if code:
                 self._to_cache(key, code)
             return code
         except Exception as exc:
-            print(f"[LLM-TEST] Failed: {exc} — using template")
+            logger.warning("[LLM-TEST] Failed: %s -- using template", exc)
             return ""
 
 

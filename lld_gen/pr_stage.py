@@ -12,6 +12,7 @@ added and removed function names for a self-contained review.
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import List, Optional
 from lld_gen.sfr_diff_analyzer import ChangeRecord, ChangeType
 from lld_gen.compile_check import CompileResult
 
+logger = logging.getLogger(__name__)
 
 _PR_TEMPLATE = """\
 # LLD Auto-Patcher PR -- {ip} ({date})
@@ -211,7 +213,7 @@ def build_pr_description(
     manual_section = ""
     if manual_review_items:
         manual_lines = [
-            "## ⚠ MANUAL REVIEW REQUIRED",
+            "## [!] MANUAL REVIEW REQUIRED",
             "",
             "These changes were **not auto-patched** — engineer action needed:",
             "",
@@ -237,7 +239,7 @@ def build_pr_description(
     # Deprecated functions section
     if deprecated_fns:
         dep_lines = [
-            "## ⚠ Deprecated LLD Functions (Manual Deletion Required)",
+            "## [!] Deprecated LLD Functions (Manual Deletion Required)",
             "",
             "The following functions reference SFR registers that were **deleted** in the",
             "new SFR version. They are kept in the LLD to avoid compilation errors in IP",
@@ -343,10 +345,10 @@ def stage_pr(
 
     pr_path = out_dir / "PR_DESCRIPTION.md"
     pr_path.write_text(pr_desc, encoding="utf-8")
-    print(f"  [PR] PR_DESCRIPTION.md -> {pr_path}")
+    logger.info("[PR] PR_DESCRIPTION.md -> %s", pr_path)
 
     if gh_url:
-        print(f"  [PR] Repo         : {gh_url}")
+        logger.info("[PR] Repo         : %s", gh_url)
         try:
             r = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -355,14 +357,14 @@ def stage_pr(
             branch = r.stdout.strip() or "main"
         except Exception:
             branch = "main"
-        print(f"  [PR] Create PR    : {gh_url}/compare/{branch}?expand=1")
+        logger.info("[PR] Create PR    : %s/compare/%s?expand=1", gh_url, branch)
 
     if not no_git:
         files_to_stage = [lld_file, test_file, sfr_new, pr_path]
         ok = _git_add(*files_to_stage)
         if ok:
-            print(f"  [PR] git add: {', '.join(str(f.name) for f in files_to_stage)}")
+            logger.info("[PR] git add: %s", ', '.join(str(f.name) for f in files_to_stage))
         else:
-            print("  [PR] WARNING: git add failed -- stage files manually.")
+            logger.warning("[PR] git add failed -- stage files manually.")
 
     return pr_path

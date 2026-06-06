@@ -192,11 +192,11 @@ class SfrIR:
 class ChangeRecord:
     change_type: str
     reg_name:    str
-    field_name:  Optional[str]
-    old_field:   Optional[FieldIR]
-    new_field:   Optional[FieldIR]
-    old_reg:     Optional[RegisterIR]
-    new_reg:     Optional[RegisterIR]
+    field_name:  Optional[str] = None
+    old_field:   Optional[FieldIR] = None
+    new_field:   Optional[FieldIR] = None
+    old_reg:     Optional[RegisterIR] = None
+    new_reg:     Optional[RegisterIR] = None
     needs_llm:   bool = False
     details:     List[str] = field(default_factory=list)
 

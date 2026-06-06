@@ -142,6 +142,20 @@ typedef volatile union _SFR_CLK_IRQ_CON_U
 } SFR_CLK_IRQ_CON, *pSFR_CLK_IRQ_CON;
 
 /* =========================================================================
+ * Register: CLK_STATUS  (Clock Status) -- UNCHANGED
+ * ========================================================================= */
+typedef volatile union _SFR_CLK_CLK_STATUS_U
+{
+    volatile UINT32 nValue _VALUE_(0x00000000);
+    struct
+    {
+        volatile UINT32 CLK_READY   : 1;  // 0-0    [RO]  Clock ready flag
+        volatile UINT32 CLK_STABLE  : 1;  // 1-1    [RO]  Clock stable flag
+        volatile UINT32 RSVD        :30;  // 2-31   reserved
+    } stNative;
+} SFR_CLK_CLK_STATUS, *pSFR_CLK_CLK_STATUS;
+
+/* =========================================================================
  * Register: RESET_CON  (Software/Hardware Reset) -- REG_ADDED (type 3)
  * Contains RST_SW/RST_HW as equivalents of moved RST_EN (FIELD_MOVED_CROSS_REG type 19)
  * ========================================================================= */
@@ -156,20 +170,6 @@ typedef volatile union _SFR_CLK_RESET_CON_U
         volatile UINT32 RSVD        :29;  // 3-31   reserved
     } stNative;
 } SFR_CLK_RESET_CON, *pSFR_CLK_RESET_CON;
-
-/* =========================================================================
- * Register: CLK_STATUS  (Clock Status) -- UNCHANGED
- * ========================================================================= */
-typedef volatile union _SFR_CLK_CLK_STATUS_U
-{
-    volatile UINT32 nValue _VALUE_(0x00000000);
-    struct
-    {
-        volatile UINT32 CLK_READY   : 1;  // 0-0    [RO]  Clock ready flag
-        volatile UINT32 CLK_STABLE  : 1;  // 1-1    [RO]  Clock stable flag
-        volatile UINT32 RSVD        :30;  // 2-31   reserved
-    } stNative;
-} SFR_CLK_CLK_STATUS, *pSFR_CLK_CLK_STATUS;
 
 /* =========================================================================
  * Aggregate SFR struct

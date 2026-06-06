@@ -1,5 +1,5 @@
 """
-compile_check.py — GCC Compile Verification Loop
+compile_check.py -- GCC Compile Verification Loop
 
 Runs: gcc -fsyntax-only -std=c11 -include sfr_new.h -include lld.h test_lld_generated.c
 
@@ -15,6 +15,7 @@ gcc returns exit code 0.
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
@@ -24,6 +25,16 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from lld_gen.lld_patcher import extract_function
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# GCC not-found error (raised when compile_check=true but gcc absent)
+# ---------------------------------------------------------------------------
+class GccNotFoundError(RuntimeError):
+    """Raised when compile_check is enabled but gcc cannot be found."""
+    pass
 
 
 @dataclass
@@ -45,13 +56,33 @@ _FN_FROM_ERROR_RE = re.compile(
 MAX_RETRIES = 5   # v3.0: was 3, now 5 per user requirement
 
 
-def _find_gcc() -> Optional[str]:
-    """Locate gcc / cc in PATH."""
+def _find_gcc(cfg_gcc: Optional[str] = None) -> str:
+    """
+    Locate gcc / cc in PATH.
+
+    Args:
+        cfg_gcc:  Explicit gcc path from config ('gcc:' YAML key).
+                  If provided and valid, use directly.
+
+    Returns:
+        Path to gcc executable.
+
+    Raises:
+        GccNotFoundError: If gcc is not found.
+    """
+    # Explicit override from config
+    if cfg_gcc:
+        found = shutil.which(cfg_gcc)
+        if found:
+            return found
+        # cfg_gcc specified but not found — still search PATH
     for exe in ("gcc", "cc", "x86_64-w64-mingw32-gcc"):
         found = shutil.which(exe)
         if found:
             return found
-    return None
+    raise GccNotFoundError(
+        "gcc not found in PATH. Install MinGW-w64 or GCC and ensure it is on PATH."
+    )
 
 
 def _run_gcc(
@@ -121,6 +152,7 @@ def run_compile_check(
     llm_client=None,    # Optional[LLMClient]
     gcc_exe:     Optional[str] = None,
     extra_includes: Optional[List[str]] = None,
+    required:    bool = True,
 ) -> CompileResult:
     """
     Run the compile verification loop.
@@ -132,6 +164,7 @@ def run_compile_check(
         llm_client:  Optional LLMClient for fix retries
         gcc_exe:     Path to gcc executable; auto-detected if None
         extra_includes: Additional -I directories
+        required:    Whether compiler is required to be present
 
     Returns:
         CompileResult with success flag and diagnostics
@@ -144,20 +177,23 @@ def run_compile_check(
 
     # Find gcc
     if gcc_exe is None:
-        gcc_exe = _find_gcc()
-    if gcc_exe is None:
-        msg = (
-            "gcc not found in PATH. Install MinGW-w64 or GCC and ensure it "
-            "is on PATH, then re-run.\n"
-            "  Windows: choco install mingw   or   winget install GnuWin32.GCC"
-        )
-        result.stderr = msg
-        result.needs_review = ["<compile_check_unavailable>"]
-        print(f"  [COMPILE] WARNING: {msg}")
-        result.success = True   # allow pipeline to continue without compiler
-        return result
+        try:
+            gcc_exe = _find_gcc()
+        except GccNotFoundError as exc:
+            if required:
+                raise exc
+            msg = (
+                "gcc not found in PATH. Install MinGW-w64 or GCC and ensure it "
+                "is on PATH, then re-run.\n"
+                "  Windows: choco install mingw   or   winget install GnuWin32.GCC"
+            )
+            result.stderr = msg
+            result.needs_review = ["<compile_check_unavailable>"]
+            logger.warning("[COMPILE] %s", msg)
+            result.success = True   # allow pipeline to continue without compiler
+            return result
 
-    print(f"  [COMPILE] Using {gcc_exe}")
+    logger.debug("[COMPILE] Using %s", gcc_exe)
 
     retcode, stdout, stderr = _run_gcc(gcc_exe, test_file, sfr_new, lld_file, extra_includes)
 
@@ -165,11 +201,11 @@ def run_compile_check(
         result.success = True
         result.stdout  = stdout
         result.stderr  = stderr
-        print("  [COMPILE] OK")
+        logger.info("[COMPILE] OK")
         return result
 
     # Failure path
-    print(f"  [COMPILE] FAIL (exit {retcode})")
+    logger.warning("[COMPILE] FAIL (exit %d)", retcode)
     failing_fns = _extract_failing_fns(stderr)
     result.failed_functions = list(failing_fns)
 
@@ -180,7 +216,7 @@ def run_compile_check(
 
     # Retry loop
     for attempt in range(1, MAX_RETRIES + 1):
-        print(f"  [COMPILE] Retry {attempt}/{MAX_RETRIES} — requesting LLM fix …")
+        logger.info("[COMPILE] Retry %d/%d -- requesting LLM fix ...", attempt, MAX_RETRIES)
 
         lld_content = lld_file.read_text(encoding="utf-8")
         fixed_any   = False
@@ -201,7 +237,7 @@ def run_compile_check(
                 if fixed_code and _patch_function_in_lld(lld_file, fn_name, fixed_code):
                     fixed_any = True
             except RuntimeError as exc:
-                print(f"  [LLM-ERROR] {exc}")
+                logger.error("[LLM-ERROR] %s", exc)
 
         if not fixed_any:
             break
@@ -213,13 +249,13 @@ def run_compile_check(
             result.success = True
             result.stdout  = stdout
             result.stderr  = stderr
-            print(f"  [COMPILE] OK after {attempt} LLM fix(es)")
+            logger.info("[COMPILE] OK after %d LLM fix(es)", attempt)
             return result
 
     # Still failing after MAX_RETRIES
     result.stderr       = stderr
     result.needs_review = list(failing_fns)
-    print(f"  [COMPILE] Still failing after {MAX_RETRIES} retries. Marked for manual review.")
+    logger.warning("[COMPILE] Still failing after %d retries. Marked for manual review.", MAX_RETRIES)
     return result
 
 
@@ -231,6 +267,7 @@ def run_compile_check_one_fn(
     llm_client   = None,
     gcc_exe:     Optional[str] = None,
     max_retries: int = MAX_RETRIES,
+    required:    bool = True,
 ) -> CompileResult:
     """
     Per-function compile gate — called immediately after each LLM patch.
@@ -247,11 +284,14 @@ def run_compile_check_one_fn(
     result = CompileResult(success=False, stdout="", stderr="")
 
     if gcc_exe is None:
-        gcc_exe = _find_gcc()
-    if gcc_exe is None:
-        result.success      = True
-        result.needs_review = ["<compile_check_unavailable>"]
-        return result
+        try:
+            gcc_exe = _find_gcc()
+        except GccNotFoundError as exc:
+            if required:
+                raise exc
+            result.success      = True
+            result.needs_review = ["<compile_check_unavailable>"]
+            return result
 
     check_file = Path(test_file) if (test_file and Path(test_file).exists()) else lld_file
 
@@ -264,7 +304,7 @@ def run_compile_check_one_fn(
             result.stdout  = stdout
             result.stderr  = stderr
             if attempt > 0:
-                print(f"    [COMPILE-FN] OK after {attempt} fix(es): {fn_name}")
+                logger.info("[COMPILE-FN] OK after %d fix(es): %s", attempt, fn_name)
             return result
 
         # Check if the error is related to our specific function
@@ -283,7 +323,7 @@ def run_compile_check_one_fn(
         if not broken_code:
             break
 
-        print(f"    [COMPILE-FN] Retry {attempt+1}/{max_retries} LLM fix: {fn_name} …")
+        logger.info("[COMPILE-FN] Retry %d/%d LLM fix: %s ...", attempt + 1, max_retries, fn_name)
         try:
             fixed_code = llm_client.fix_compile_error(
                 broken_code=broken_code,
@@ -293,11 +333,11 @@ def run_compile_check_one_fn(
             if fixed_code:
                 _patch_function_in_lld(lld_file, fn_name, fixed_code)
         except RuntimeError as exc:
-            print(f"    [LLM-ERROR] {exc}")
+            logger.error("[LLM-ERROR] %s", exc)
             break
 
     # Still failing after max_retries
     result.stderr       = stderr
     result.needs_review = [fn_name]
-    print(f"    [COMPILE-FN] MANUAL_REVIEW: {fn_name} (failed after {max_retries} retries)")
+    logger.warning("[COMPILE-FN] MANUAL_REVIEW: %s (failed after %d retries)", fn_name, max_retries)
     return result

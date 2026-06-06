@@ -32,6 +32,7 @@ Key rules:
 """
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -41,6 +42,8 @@ from lld_gen.sfr_diff_analyzer import (
     ChangeRecord, ChangeType, FieldIR, RegisterIR, SfrIR,
 )
 from lld_gen.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +800,7 @@ class LLDPatcher:
                 return new_code_with_sha
             return block.rstrip() + "\n\n" + new_code + "\n"
         except RuntimeError as exc:
-            print(f"  [LLM-ERROR] {exc}; falling back to template")
+            logger.error("[LLM-ERROR] %s; falling back to template", exc)
             self._test_stubs.extend(self._make_test(cr))
             return self._template_fallback(block, cr)
 
@@ -1051,7 +1054,7 @@ class LLDPatcher:
             return block
 
         if ct in {ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED}:
-            return self._llm_regenerate(block, cr)
+            return self._llm_body_only(block, cr)
 
         # ── Field semantic / behavior changes (LLM preferred, template fallback)
         if ct in {
@@ -1137,7 +1140,7 @@ class LLDPatcher:
 
             # Auto-migrate base[] → struct-based before applying changes
             if not _is_struct_based(block) and new_ir and reg_name in new_ir.registers:
-                print(f"  [MIGRATE] {reg_name} — base[] → struct-based")
+                logger.info("[MIGRATE] %s -- base[] -> struct-based", reg_name)
                 block = _migrate_block_to_struct(
                     self.ip, block, reg_name, new_ir.registers[reg_name]
                 )
@@ -1145,14 +1148,14 @@ class LLDPatcher:
                 # Use old reg info for migration if not in new_ir
                 first_cr = changes_by_reg[reg_name][0]
                 if first_cr.old_reg:
-                    print(f"  [MIGRATE] {reg_name} — base[] → struct-based (old IR)")
+                    logger.info("[MIGRATE] %s -- base[] -> struct-based (old IR)", reg_name)
                     block = _migrate_block_to_struct(
                         self.ip, block, reg_name, first_cr.old_reg
                     )
 
             # REG_DELETED: deprecate, don't drop
             if reg_name in reg_deletes:
-                print(f"  [DEPRECATE] Register block: {reg_name}")
+                logger.warning("[DEPRECATE] Register block: %s", reg_name)
                 block, fn_names = _deprecate_block(block, reg_name)
                 self._deprecated_fns.extend(fn_names)
                 out_parts.append(block)
@@ -1163,7 +1166,7 @@ class LLDPatcher:
             current       = block
 
             for cr in block_changes:
-                print(f"  [{cr.change_type}] {reg_name}.{cr.field_name or ''}")
+                logger.info("[%s] %s.%s", cr.change_type, reg_name, cr.field_name or '')
                 current = self._apply(current, sha, cr)
 
             # Update SHA for any changed block
@@ -1179,7 +1182,7 @@ class LLDPatcher:
         for cr in reg_adds:
             if new_ir and cr.reg_name in new_ir.registers:
                 reg = new_ir.registers[cr.reg_name]
-                print(f"  [ADD] Register block: {cr.reg_name}")
+                logger.info("[ADD] Register block: %s", cr.reg_name)
                 new_block = generate_register_block(self.ip, reg)
                 self._test_stubs.extend(
                     [generate_test_for_field(self.ip, cr.reg_name, f, reg.offset)
@@ -1201,7 +1204,7 @@ class LLDPatcher:
             )
 
         out_path.write_text(content, encoding="utf-8")
-        print(f"  Wrote {out_path}")
+        logger.info("Wrote %s", out_path)
         return content
 
     @staticmethod

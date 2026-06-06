@@ -12,8 +12,12 @@ Matching strategy (in priority order):
 """
 from __future__ import annotations
 
+import logging
+
+import json as _json
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -23,6 +27,8 @@ try:
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +82,9 @@ class PatcherConfig:
     atomic_commits:    bool = True   # one commit per SFR file
     commit_prefix:     str  = "feat(lld)"  # git commit message prefix
     emit_enum_defines: bool = False  # generate #define enums for FIELD_ENUM_CHANGED
+    # v3.1 — gcc gate + LLM prompt
+    compile_check:     bool = True   # True = gcc REQUIRED (stop if not found)
+    force_no_llm:      bool = False  # True = skip LLM prompt, use template mode silently
 
 
 @dataclass
@@ -217,6 +226,8 @@ def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
         atomic_commits    = _bool("atomic_commits",  True),
         commit_prefix     = _str("commit_prefix",    "feat(lld)"),
         emit_enum_defines = _bool("emit_enum_defines", False),
+        compile_check     = _bool("compile_check",   True),
+        force_no_llm      = _bool("force_no_llm",    False),
         # Workflow-specific
         ipxact          = ipxact_spec,
         lld_repo        = lld_spec,
@@ -282,6 +293,8 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         ollama_model = str(data.get("ollama_model",   "") or ""),
         ip_overrides = dict(data.get("ip_overrides") or {}),
         ip_list      = list(data.get("ip_list") or []),
+        compile_check = bool(data.get("compile_check", True)),
+        force_no_llm  = bool(data.get("force_no_llm",  False)),
     )
 
 
@@ -323,6 +336,71 @@ def _parse_yaml(text: str) -> dict:
                 except ValueError:
                     data[key] = val
     return data
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint — resume pipeline from where it stopped
+# ---------------------------------------------------------------------------
+_CHECKPOINT_FILE = ".lld_patcher_checkpoint.json"
+
+
+def save_checkpoint(
+    out_dir: Path,
+    completed_ips: List[str],
+    stage: str,
+    context: Optional[Dict] = None,
+) -> Path:
+    """
+    Save pipeline checkpoint so it can resume after a failure (e.g. gcc missing).
+
+    Args:
+        out_dir:        Output directory where checkpoint file is written.
+        completed_ips:  List of IP names already processed successfully.
+        stage:          Pipeline stage where checkpoint was saved
+                        ('pre_gcc', 'pre_llm', 'ip_done', 'compile').
+        context:        Optional extra data to persist (e.g. ip_sfr_map).
+
+    Returns:
+        Path to the checkpoint file.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / _CHECKPOINT_FILE
+    data = {
+        "completed_ips": completed_ips,
+        "stage":         stage,
+        "context":       context or {},
+        "timestamp":     datetime.now().isoformat(),
+    }
+    ckpt_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+    logger.debug("[CHECKPOINT] Saved -> %s", ckpt_path)
+    return ckpt_path
+
+
+def load_checkpoint(out_dir: Path) -> Optional[Dict]:
+    """
+    Load checkpoint if it exists. Returns the checkpoint dict, or None.
+
+    Checkpoint dict:
+        {"completed_ips": [...], "stage": "...", "context": {...}, "timestamp": "..."}
+    """
+    ckpt_path = out_dir / _CHECKPOINT_FILE
+    if not ckpt_path.exists():
+        return None
+    try:
+        data = _json.loads(ckpt_path.read_text(encoding="utf-8"))
+        logger.info("[CHECKPOINT] Resuming from %s (%d IP(s) already done)",
+                    data.get('stage', '?'), len(data.get('completed_ips', [])))
+        return data
+    except Exception:
+        return None
+
+
+def clear_checkpoint(out_dir: Path) -> None:
+    """Remove checkpoint file after successful completion."""
+    ckpt_path = out_dir / _CHECKPOINT_FILE
+    if ckpt_path.exists():
+        ckpt_path.unlink()
+        logger.info("[CHECKPOINT] Cleared -- pipeline completed successfully")
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +451,7 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
                 ))
                 matched_old.add(stem)
             else:
-                print(f"  [WARN] No LLD file found for IP={ip} in {cfg.lld_dir}")
+                logger.warning("No LLD file found for IP=%s in %s", ip, cfg.lld_dir)
 
     # ── Rule 2: _old/_new suffix pairing ────────────────────────────────────
     for stem, old_path in old_files.items():
@@ -405,7 +483,7 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
                         ))
                         matched_old.add(stem)
                     else:
-                        print(f"  [WARN] No LLD file found for IP={ip} in {cfg.lld_dir}")
+                        logger.warning("No LLD file found for IP=%s in %s", ip, cfg.lld_dir)
                 break
 
     # ── Filter to ip_list if specified ─────────────────────────────────────

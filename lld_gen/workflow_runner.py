@@ -24,6 +24,8 @@ Usage:
 """
 from __future__ import annotations
 
+import logging
+
 import shutil
 import tempfile
 import time
@@ -40,6 +42,8 @@ from lld_gen.llm_client import LLMClient, make_llm_client
 from lld_gen.compile_check import run_compile_check, run_compile_check_one_fn
 from lld_gen.pr_stage import stage_pr, build_pr_description
 from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -78,13 +82,13 @@ class WorkflowRunResult:
         return all(r.status in ("OK", "SKIP") for r in self.ip_results)
 
     def print_summary(self) -> None:
-        print("\n" + "═" * 68)
-        print("  LLD Auto-Patcher v3.0 — Workflow Summary")
-        print("═" * 68)
+        logger.info("=" * 68)
+        logger.info("  LLD Auto-Patcher v3.0 -- Workflow Summary")
+        logger.info("=" * 68)
         for r in self.ip_results:
-            icon = {"OK": "✅", "SKIP": "⏭", "FAIL": "❌", "WARN": "⚠",
-                    "MANUAL": "📋"}.get(r.status, "?")
-            print(
+            icon = {"OK": "[OK]", "SKIP": "[SKIP]", "FAIL": "[X]", "WARN": "[!]",
+                    "MANUAL": "[MANUAL]"}.get(r.status, "?")
+            logger.info(
                 f"  {icon} {r.ip:<12}  {r.status:<6}  "
                 f"{r.n_changes:>3} changes  "
                 f"{r.n_auto_patched:>3} auto  "
@@ -93,12 +97,12 @@ class WorkflowRunResult:
                 f"{r.elapsed_s:>6.1f}s"
             )
             if r.pr_url:
-                print(f"     PR: {r.pr_url}")
-        print("═" * 68)
+                logger.info(f"     PR: {r.pr_url}")
+        logger.info("=" * 68)
         total_m, total_s = divmod(int(self.total_elapsed_s), 60)
-        print(f"  Total pipeline time : {total_m}m {total_s:02d}s  "
+        logger.info(f"  Total pipeline time : {total_m}m {total_s:02d}s  "
               f"({self.total_elapsed_s:.2f}s)")
-        print("═" * 68)
+        logger.info("=" * 68)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +149,7 @@ class WorkflowRunner:
         ipxact_dest = self._work_dir / "ipxact_repo"
         lld_dest    = self._work_dir / "lld_repo"
 
-        print("\n[A] Cloning IP-XACT repository …")
+        logger.info("[A] Cloning IP-XACT repository ...")
         if self.cfg.ipxact.url:
             self._ipxact_gm = GitManager(
                 self._repo_config(self.cfg.ipxact), work_dir=ipxact_dest
@@ -155,9 +159,9 @@ class WorkflowRunner:
         else:
             # Fallback: sfr_new_dir already contains converted SFR headers
             ipxact_path = self.cfg.sfr_new_dir
-            print(f"  [A] No ipxact.url — using sfr_new_dir: {ipxact_path}")
+            logger.info(f"  [A] No ipxact.url -- using sfr_new_dir: {ipxact_path}")
 
-        print("\n[A] Cloning LLD repository …")
+        logger.info("[A] Cloning LLD repository ...")
         if self.cfg.lld_repo.url:
             self._lld_gm = GitManager(
                 self._repo_config(self.cfg.lld_repo), work_dir=lld_dest
@@ -171,7 +175,7 @@ class WorkflowRunner:
         else:
             # Fallback: use configured lld_dir / sfr_old_dir
             lld_path = self.cfg.lld_dir.parent
-            print(f"  [A] No lld_repo.url — using lld_dir: {self.cfg.lld_dir}")
+            logger.info(f"  [A] No lld_repo.url -- using lld_dir: {self.cfg.lld_dir}")
 
         return ipxact_path, lld_path
 
@@ -183,7 +187,7 @@ class WorkflowRunner:
         Returns {ip: Path(SFR_IP.h)}.
         Falls back to pre-existing SFR headers if no .xml files found.
         """
-        print("\n[B] Converting IP-XACT → SFR headers …")
+        logger.info("[B] Converting IP-XACT -> SFR headers ...")
         out_dir = self._work_dir / "new_sfrs"
         out_dir.mkdir(exist_ok=True)
 
@@ -202,7 +206,7 @@ class WorkflowRunner:
 
         if not ip_map:
             # Fallback: scan for pre-existing SFR_*.h files
-            print("  [B] No .xml converted — scanning for existing SFR_*.h …")
+            logger.info("  [B] No .xml converted -- scanning for existing SFR_*.h ...")
             for sfr_h in ipxact_path.rglob("SFR_*.h"):
                 ip = sfr_h.stem.upper().removeprefix("SFR_")
                 if not self.cfg.ip_list or ip in {x.upper() for x in self.cfg.ip_list}:
@@ -268,24 +272,24 @@ class WorkflowRunner:
         if old_sfr is None:
             result.status = "SKIP"
             result.error  = f"No current SFR found for IP={ip}"
-            print(f"  [D] SKIP {ip}: {result.error}")
+            logger.info(f"  [D] SKIP {ip}: {result.error}")
             return result
 
         if lld_file is None:
             result.status = "SKIP"
             result.error  = f"No LLD file found for IP={ip}"
-            print(f"  [D] SKIP {ip}: {result.error}")
+            logger.info(f"  [D] SKIP {ip}: {result.error}")
             return result
 
-        print(f"\n  [D] Diff: {old_sfr.name} vs {new_sfr.name} …")
+        logger.info(f"  [D] Diff: {old_sfr.name} vs {new_sfr.name} ...")
         changes = classify_sfr_diff(old_sfr, new_sfr, ip=ip)
         result.n_changes = len(changes)
         result.change_summary = summarize_changes(changes)
-        print(f"  [D] {result.change_summary.splitlines()[1]}")
+        logger.info(f"  [D] {result.change_summary.splitlines()[1]}")
 
         if not changes:
             result.status = "SKIP"
-            print(f"  [D] No changes for {ip} — skipping")
+            logger.info(f"  [D] No changes for {ip} -- skipping")
             return result
 
         # Separate manual review items
@@ -300,7 +304,7 @@ class WorkflowRunner:
         ]
 
         # ── E: Patch LLD ─────────────────────────────────────────────────────
-        print(f"  [E] Patching {lld_file.name} ({len(auto_crs)} auto-patchable changes) …")
+        logger.info(f"  [E] Patching {lld_file.name} ({len(auto_crs)} auto-patchable changes) ...")
         cfg = self.cfg
 
         out_dir = cfg.output_dir
@@ -327,7 +331,7 @@ class WorkflowRunner:
         except RuntimeError as exc:
             result.status = "FAIL"
             result.error  = f"Patcher error: {exc}"
-            print(f"  [E] FAIL: {exc}")
+            logger.error(f"  [E] FAIL: {exc}")
             return result
 
         # Write test file
@@ -347,13 +351,14 @@ class WorkflowRunner:
         result.n_auto_patched = len(auto_crs) - len(patcher.get_deprecated_fns() or [])
 
         # ── E: Compile gate (full file after all patches) ─────────────────────
-        print(f"  [E] Compile-checking {out_lld.name} …")
+        logger.info(f"  [E] Compile-checking {out_lld.name} ...")
         compile_result = run_compile_check(
             test_file  = test_file,
             sfr_new    = new_sfr,
             lld_file   = out_lld,
             llm_client = llm_client if not cfg.no_llm else None,
             gcc_exe    = gcc_exe,
+            required   = cfg.compile_check,
         )
         result.compile_ok = compile_result.success
         if compile_result.needs_review:
@@ -396,7 +401,7 @@ class WorkflowRunner:
 
         pr_desc_path = out_dir / "PR_DESCRIPTION.md"
         pr_desc_path.write_text(pr_desc, encoding="utf-8")
-        print(f"  [G] PR description written: {pr_desc_path.name}")
+        logger.debug(f"  [G] PR description written: {pr_desc_path.name}")
 
         # ── G: Atomic git commit ──────────────────────────────────────────────
         if not cfg.no_git and self._lld_gm:
@@ -426,7 +431,7 @@ class WorkflowRunner:
             ipxact_path, lld_path = self._clone_repos()
         except Exception as exc:
             run_result.error = f"Clone failed: {exc}"
-            print(f"[ERROR] {run_result.error}")
+            logger.error(f"{run_result.error}")
             return run_result
 
         # ── B: Convert IPxact → SFR headers ──────────────────────────────────
@@ -434,12 +439,12 @@ class WorkflowRunner:
             ip_sfr_map = self._convert_ipxact(ipxact_path)
         except Exception as exc:
             run_result.error = f"IPxact conversion failed: {exc}"
-            print(f"[ERROR] {run_result.error}")
+            logger.error(f"{run_result.error}")
             return run_result
 
         if not ip_sfr_map:
             run_result.error = "No SFR headers produced from IPxact conversion"
-            print(f"[ERROR] {run_result.error}")
+            logger.error(f"{run_result.error}")
             return run_result
 
         # ── C: Set up LLM client (from llm: config block) ─────────────────────
@@ -455,15 +460,110 @@ class WorkflowRunner:
             }
             llm_client = make_llm_client(llm_data)
             if not llm_client or not llm_client.available:
-                print("  [LLM] No backend available — falling back to template mode")
-                llm_client = None
+                force_no_llm = getattr(self.cfg, "force_no_llm", False)
+                if force_no_llm:
+                    # Config says skip silently — template mode, flag for review
+                    logger.warning("  [LLM] force_no_llm=true -> template-only mode "
+                          "(LLM changes flagged for MANUAL REVIEW)")
+                    llm_client = None
+                else:
+                    # Interactive prompt
+                    logger.warning("=" * 70)
+                    logger.warning("  [!] LLM BACKEND NOT AVAILABLE")
+                    logger.warning("  -------------------------------------------------")
+                    logger.warning("  The following change types REQUIRE LLM but will be")
+                    logger.warning("  flagged for MANUAL REVIEW instead of auto-patched:")
+                    logger.warning("    COMMENT_CHANGED, MULTI_CHANGED, FIELD_SPLIT/MERGED,")
+                    logger.warning("    FIELD_POLARITY_CHANGED, FIELD_ENUM_CHANGED, etc.")
+                    logger.warning("")
+                    logger.warning("  Options:")
+                    logger.warning("    1. Fix LLM config and re-run (recommended)")
+                    logger.warning("       -> Set 'llm: backend: ollama' + start Ollama")
+                    logger.warning("       -> Or 'llm: backend: openai' + OPENAI_API_KEY env")
+                    logger.warning("    2. Continue with template-only mode")
+                    logger.warning("       -> LLM-needing changes flagged for manual review")
+                    logger.warning("=" * 70)
+                    try:
+                        choice = input("  Continue without LLM? [y/N]: ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        choice = "n"
+                    if choice not in ("y", "yes"):
+                        from lld_gen.config import save_checkpoint
+                        save_checkpoint(self.cfg.output_dir, completed_ips=[],
+                                        stage="pre_llm",
+                                        context={"reason": "user chose to abort -- LLM not available"})
+                        run_result.error = "LLM not available -- user chose to abort. Fix config and re-run."
+                        logger.error(f"  [ABORT] {run_result.error}")
+                        return run_result
+                    logger.warning("  [LLM] Proceeding with template-only mode "
+                          "(LLM changes -> NEEDS_REVIEW)")
+                    llm_client = None
 
-        from lld_gen.compile_check import _find_gcc
+        # ── C2: GCC gate (conditional on compile_check config) ────────────────
+        from lld_gen.compile_check import _find_gcc, GccNotFoundError
+        compile_check = getattr(self.cfg, "compile_check", True)
+        gcc_exe: Optional[str] = None
+
+        if compile_check:
+            try:
+                gcc_exe = _find_gcc(self.cfg.gcc)
+            except GccNotFoundError:
+                logger.error("=" * 70)
+                logger.error("  [X] GCC NOT FOUND -- PIPELINE STOPPED")
+                logger.error("  -------------------------------------------------")
+                logger.error("  compile_check: true in your config, but gcc is")
+                logger.error("  not found in PATH.")
+                logger.error("")
+                logger.error("  gcc is REQUIRED for LLD compile verification.")
+                logger.error("  Install gcc and re-run -- the pipeline will resume")
+                logger.error("  from this point automatically.")
+                logger.error("")
+                logger.error("  Fix options:")
+                logger.error("    * Linux:   sudo apt install gcc")
+                logger.error("    * macOS:   brew install gcc")
+                logger.error("    * Windows: choco install mingw")
+                logger.error("    * Or set 'gcc: /path/to/gcc' in your config YAML")
+                logger.error("    * Or set 'compile_check: false' to skip (not recommended)")
+                logger.error("=" * 70)
+                from lld_gen.config import save_checkpoint
+                save_checkpoint(self.cfg.output_dir, completed_ips=[],
+                                stage="pre_gcc",
+                                context={"ip_sfr_map": {k: str(v) for k, v in ip_sfr_map.items()}})
+                run_result.error = ("gcc not found -- pipeline stopped. "
+                                    "Install gcc and re-run to resume.")
+                run_result.total_elapsed_s = time.perf_counter() - pipeline_start
+                run_result.print_summary()
+                return run_result
+            logger.debug(f"  [GCC] Found: {gcc_exe}")
+        else:
+            logger.info("  [GCC] compile_check: false -> skipping gcc verification")
+            try:
+                gcc_exe = _find_gcc(self.cfg.gcc)  # still try, but don't fail
+            except GccNotFoundError:
+                gcc_exe = None
+            if gcc_exe:
+                logger.debug(f"  [GCC] Found anyway: {gcc_exe} (will use for optional checks)")
+
+        # ── Load checkpoint for resume ────────────────────────────────────────
+        from lld_gen.config import load_checkpoint, save_checkpoint, clear_checkpoint
+        checkpoint = load_checkpoint(self.cfg.output_dir)
+        checkpoint_completed: set = set()
+        if checkpoint:
+            checkpoint_completed = set(checkpoint.get("completed_ips", []))
+
         # ── D-G: Run per-IP pipeline ──────────────────────────────────────────
-        print(f"\n[D-G] Processing {len(ip_sfr_map)} IP(s): {', '.join(ip_sfr_map)}")
+        logger.info(f"[D-G] Processing {len(ip_sfr_map)} IP(s): {', '.join(ip_sfr_map)}")
+        completed_ips: List[str] = list(checkpoint_completed)
+
         for ip, new_sfr in sorted(ip_sfr_map.items()):
-            print(f"\n{'─' * 60}")
-            print(f"  IP: {ip}")
+            # Skip already-completed IPs (resume mode)
+            if ip in checkpoint_completed:
+                logger.info("-" * 60)
+                logger.info(f"  IP: {ip}  [RESUME -- already completed, skipping]")
+                continue
+
+            logger.info("-" * 60)
+            logger.info(f"  IP: {ip}")
             ip_start = time.perf_counter()
             try:
                 ip_result = self._run_one_ip(
@@ -475,13 +575,18 @@ class WorkflowRunner:
                 )
             except Exception as exc:
                 ip_result = IPWorkflowResult(ip=ip, status="FAIL", error=str(exc))
-                print(f"  [FAIL] {ip}: {exc}")
+                logger.error(f"  [FAIL] {ip}: {exc}")
             ip_result.elapsed_s = time.perf_counter() - ip_start
             run_result.ip_results.append(ip_result)
+            completed_ips.append(ip)
+
+            # Save checkpoint after each IP
+            save_checkpoint(self.cfg.output_dir, completed_ips=completed_ips,
+                            stage="ip_done", context={"last_ip": ip})
 
         # ── H: Push + raise PR ────────────────────────────────────────────────
         if not self.cfg.no_git and self._lld_gm:
-            print("\n[H] Pushing patched branch …")
+            logger.info("[H] Pushing patched branch ...")
             try:
                 patch_branch = self._lld_gm.current_branch()
                 self._lld_gm.push(branch=patch_branch)
@@ -518,9 +623,13 @@ class WorkflowRunner:
                 )
                 run_result.pr_url = pr_url
             except Exception as exc:
-                print(f"  [H-WARN] Push/PR failed: {exc}")
+                logger.warning(f"  [H-WARN] Push/PR failed: {exc}")
 
         run_result.total_elapsed_s = time.perf_counter() - pipeline_start
+
+        # Clear checkpoint — pipeline completed successfully
+        clear_checkpoint(self.cfg.output_dir)
+
         run_result.print_summary()
         return run_result
 

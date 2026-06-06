@@ -29,7 +29,7 @@ SAMPLE_V2 = Path(__file__).parent / "sample_regs_v2.xlsx"
 
 @pytest.fixture(scope="module", autouse=True)
 def ensure_samples():
-    from tests.create_sample_excel import create_sample, create_sample_v2
+    from .create_sample_excel import create_sample, create_sample_v2
     if not SAMPLE_V1.exists():
         create_sample(SAMPLE_V1)
     if not SAMPLE_V2.exists():

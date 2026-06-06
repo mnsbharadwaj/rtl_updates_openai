@@ -269,23 +269,27 @@ write_test_file(new_ir, llm_client, lld_text)
      All stubs → main() calls each test function
 ```
 
-### 3.4 SFR File Auto-Detection
+### 3.4 SFR File Mapping & LLD Discovery (discover_jobs)
 
-```
-SfrParser._detect_format(text):
-    if "typedef volatile union" in text:
-        → Samsung union-bitfield parser
-        reads stNative struct fields with // lsb-msb [ACCESS] comment
-    else:
-        → #define MASK/SHIFT parser
-        reads #define IP_REG_FIELD_MASK / _SHIFT / _ACCESS
+When SFR changes are found, the pipeline matches the peripheral IP name (e.g. `PMU` parsed from `sfr_pmu.h`) to its corresponding LLD header file in `lld_dir` using case-insensitive filename-based matching rules defined in `discover_jobs()` and `_find_lld()` of `config.py`.
 
-IP auto-detection from filename:
-    sfr_pmu.h         → IP = "PMU"
-    sfr_uart_old.h    → IP = "UART"
-    sfr_dma_v2.h      → IP = "DMA"
-    Pattern: sfr_{ip}[_{suffix}].h  (case insensitive)
-```
+It searches the configured `lld_dir` for a file matching the IP name in one of the following priority orders:
+1. `lld_{ip}.h` (e.g., `lld_pmu.h`)
+2. `{ip}_lld.h` (e.g., `pmu_lld.h`)
+3. `{ip}.h` (e.g., `pmu.h`)
+4. `lld_{ip}_reg.h` (e.g., `lld_pmu_reg.h`)
+5. `{ip}_reg.h` (e.g., `pmu_reg.h`)
+
+If a matching LLD file is found, it is paired into an `IPJob` structure containing the old SFR, new SFR, and LLD paths, and queued for the patching stage.
+
+### 3.5 Cross-LLD Caller Reference Scanning (lld_cross_ref)
+
+When register layouts, access permissions, or bitwidths change, other LLD files that call the modified driver functions may also need updates. The system includes an automated reference scanner in `lld_cross_ref.py`:
+
+1. **Include Detection:** It scans the `lld_dir` to find all `.c`, `.h`, or `.cpp` files that `#include` the modified IP's LLD header (e.g., `#include "lld_pmu.h"`).
+2. **Call Site Scanning:** Inside those files, it performs a regex search for invocations of any of the modified LLD functions (e.g., `lld_pmu_status_con_complete_clear`).
+3. **Context Extraction:** For every match, the scanner extracts the caller function name, the line number, and a ±10-line source code context window.
+4. **Markdown Report:** The results are formatted into a markdown table and included in `PR_DESCRIPTION.md` to alert reviewers to inspect call-site compatibility.
 
 ---
 
@@ -382,6 +386,16 @@ static void test_lld_pmu_clk_con_clk_sel_set(void) {
     assert(sfr.stCLK_CON.stNative.CLK_SEL == 1U);
 }
 ```
+
+### 4.8 AST vs. Regex Design Decision
+
+The system utilizes regular expressions and surgical text matching instead of a compiler-based C AST (Abstract Syntax Tree) parser (e.g., Clang LibTooling, pycparser) for both SFR parsing and LLD file patching.
+
+**Rationale:**
+- **Robustness against Incomplete Compilation Environments:** Standalone SFR headers contain codebase-specific types (e.g., `UINT32`, `_VALUE_()`) and lack standard library/system include paths. A true AST parser requires all headers to compile cleanly, which is extremely fragile. Regex parsing allows processing headers standalone.
+- **Preservation of Non-Semantic Code Elements:** Compiler AST parsers discard comments, custom whitespace, macros, and formatting. Our regex-based patcher surgically replaces only the changed register blocks, preserving comments (e.g., bitfield specifications) and layout structure verbatim.
+- **Zero-Dependency Portability:** Using AST parsers like Clang bindings requires platform-specific compilation binaries and native libraries. The Python regex-based approach has zero dependencies and runs out-of-the-box on any developer environment or CI/CD agent.
+- **Performance and Simplicity:** Scanning files with light regular expressions is orders of magnitude faster than building and traversing an AST, while dramatically simplifying the code generator codebase.
 
 ---
 

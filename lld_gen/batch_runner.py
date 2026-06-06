@@ -11,6 +11,8 @@ Processes multiple IPs in one shot:
 """
 from __future__ import annotations
 
+import logging
+
 import shutil
 import sys
 import time
@@ -18,15 +20,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from lld_gen.config import PatcherConfig, IPJob, load_config, discover_jobs
+from lld_gen.config import (
+    PatcherConfig, IPJob, load_config, discover_jobs,
+    save_checkpoint, load_checkpoint, clear_checkpoint,
+)
 from lld_gen.sfr_diff_analyzer import (
     classify_sfr_diff, summarize_changes, SfrParser, ChangeType,
 )
 from lld_gen.lld_patcher import LLDPatcher
 from lld_gen.llm_client import LLMClient
-from lld_gen.compile_check import run_compile_check
+from lld_gen.compile_check import run_compile_check, _find_gcc, GccNotFoundError
 from lld_gen.pr_stage import stage_pr
 from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -70,46 +77,143 @@ class BatchRunner:
 
     def run(self) -> List[IPResult]:
         """Discover jobs from config and run each one."""
-        print("=" * 70)
-        print("  LLD Auto-Patcher -- Batch Mode")
-        print(f"  sfr_old_dir : {self.cfg.sfr_old_dir}")
-        print(f"  sfr_new_dir : {self.cfg.sfr_new_dir}")
-        print(f"  lld_dir     : {self.cfg.lld_dir}")
-        print(f"  output_dir  : {self.cfg.output_dir}")
-        print(f"  tests_dir   : {self.cfg.tests_dir}")
-        print("=" * 70)
+        logger.info("=" * 70)
+        logger.info("  LLD Auto-Patcher -- Batch Mode")
+        logger.info(f"  sfr_old_dir : {self.cfg.sfr_old_dir}")
+        logger.info(f"  sfr_new_dir : {self.cfg.sfr_new_dir}")
+        logger.info(f"  lld_dir     : {self.cfg.lld_dir}")
+        logger.info(f"  output_dir  : {self.cfg.output_dir}")
+        logger.info(f"  tests_dir   : {self.cfg.tests_dir}")
+        logger.info("=" * 70)
 
         # Discover all IP jobs
-        print("\n[DISCOVER] Scanning directories for SFR pairs...")
+        logger.info("[DISCOVER] Scanning directories for SFR pairs...")
         jobs = discover_jobs(self.cfg)
 
         if not jobs:
-            print("[DISCOVER] No SFR pairs found. Check directory paths and naming conventions.")
-            print("""
-  Expected naming convention (any of these work):
-    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/lld_pmu.h
-    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/pmu_lld.h
-    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/pmu.h
-""")
+            logger.warning("[DISCOVER] No SFR pairs found. Check directory paths and naming conventions.")
+            logger.warning(
+                "  Expected naming convention (any of these work):\n"
+                "    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/lld_pmu.h\n"
+                "    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/pmu_lld.h\n"
+                "    old_sfr/sfr_pmu.h  +  new_sfr/sfr_pmu.h  +  lld/pmu.h"
+            )
             return []
 
-        print(f"[DISCOVER] Found {len(jobs)} IP(s) to process:")
+        logger.info(f"[DISCOVER] Found {len(jobs)} IP(s) to process:")
         for j in jobs:
-            print(f"  {j.ip:<12} {j.old_sfr.name} -> {j.new_sfr.name} -> {j.lld.name}")
+            logger.info(f"  {j.ip:<12} {j.old_sfr.name} -> {j.new_sfr.name} -> {j.lld.name}")
 
         # Ensure output directories exist
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         self.cfg.tests_dir.mkdir(parents=True, exist_ok=True)
 
+        # ── GCC gate (conditional on compile_check config) ────────────────
+        compile_check = getattr(self.cfg, "compile_check", True)
+        gcc_exe: Optional[str] = None
+
+        if compile_check:
+            try:
+                gcc_exe = _find_gcc(self.cfg.gcc)
+            except GccNotFoundError:
+                logger.error("=" * 70)
+                logger.error("  [X]  GCC NOT FOUND -- PIPELINE STOPPED")
+                logger.error("  -------------------------------------------------")
+                logger.error("  compile_check: true in your config, but gcc is")
+                logger.error("  not found in PATH.")
+                logger.error("")
+                logger.error("  gcc is REQUIRED for LLD compile verification.")
+                logger.error("  Install gcc and re-run -- the pipeline will resume")
+                logger.error("  from this point automatically.")
+                logger.error("")
+                logger.error("  Fix options:")
+                logger.error("    * Linux:   sudo apt install gcc")
+                logger.error("    * macOS:   brew install gcc")
+                logger.error("    * Windows: choco install mingw")
+                logger.error("    * Or set 'gcc: /path/to/gcc' in your config YAML")
+                logger.error("    * Or set 'compile_check: false' to skip (not recommended)")
+                logger.error("=" * 70)
+                save_checkpoint(self.cfg.output_dir, completed_ips=[],
+                                stage="pre_gcc",
+                                context={"n_jobs": len(jobs)})
+                logger.error("  [STOPPED] Install gcc and re-run to resume.")
+                return []
+            logger.debug(f"  [GCC] Found: {gcc_exe}")
+        else:
+            logger.info("  [GCC] compile_check: false -> skipping gcc verification")
+            try:
+                gcc_exe = _find_gcc(self.cfg.gcc)
+            except GccNotFoundError:
+                gcc_exe = None
+            if gcc_exe:
+                logger.debug(f"  [GCC] Found anyway: {gcc_exe}")
+
+        # ── LLM availability check ────────────────────────────────────────
+        force_no_llm = getattr(self.cfg, "force_no_llm", False)
+        if not self.cfg.no_llm and not force_no_llm:
+            # Quick probe: create a temp LLM client to check availability
+            _test_llm = LLMClient(hf_token="", ollama_model=self.cfg.ollama_model or "")
+            if not _test_llm.available:
+                logger.warning("=" * 70)
+                logger.warning("  [!]  LLM BACKEND NOT AVAILABLE")
+                logger.warning("  -------------------------------------------------")
+                logger.warning("  The following change types REQUIRE LLM but will be")
+                logger.warning("  flagged for MANUAL REVIEW instead of auto-patched:")
+                logger.warning("    COMMENT_CHANGED, MULTI_CHANGED, FIELD_SPLIT/MERGED,")
+                logger.warning("    FIELD_POLARITY_CHANGED, FIELD_ENUM_CHANGED, etc.")
+                logger.warning("")
+                logger.warning("  Options:")
+                logger.warning("    1. Fix LLM config and re-run (recommended)")
+                logger.warning("       -> Set 'ollama_model:' or configure 'llm:' block")
+                logger.warning("    2. Continue with template-only mode")
+                logger.warning("       -> LLM-needing changes flagged for manual review")
+                logger.warning("    3. Set 'force_no_llm: true' in config to skip this prompt")
+                logger.warning("=" * 70)
+                try:
+                    choice = input("  Continue without LLM? [y/N]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    choice = "n"
+                if choice not in ("y", "yes"):
+                    save_checkpoint(self.cfg.output_dir, completed_ips=[],
+                                    stage="pre_llm",
+                                    context={"reason": "user chose to abort — LLM not available"})
+                    logger.error("  [ABORT] Fix LLM config and re-run.")
+                    return []
+                logger.warning("  [LLM] Proceeding with template-only mode")
+        elif force_no_llm and not self.cfg.no_llm:
+            logger.warning("  [LLM] force_no_llm=true -> template-only mode "
+                  "(LLM changes flagged for MANUAL REVIEW)")
+
+        # ── Load checkpoint for resume ────────────────────────────────────
+        checkpoint = load_checkpoint(self.cfg.output_dir)
+        checkpoint_completed: set = set()
+        if checkpoint:
+            checkpoint_completed = set(checkpoint.get("completed_ips", []))
+
         # Process each IP
         self._pipeline_start = time.perf_counter()
+        completed_ips: list = list(checkpoint_completed)
+
         for job in jobs:
+            # Skip already-completed IPs (resume mode)
+            if job.ip in checkpoint_completed:
+                logger.info(f"  [RESUME] {job.ip}: already completed -- skipping")
+                continue
+
             ip_start = time.perf_counter()
             result = self._run_one(job)
             result.elapsed_s = time.perf_counter() - ip_start
             self._results.append(result)
+            completed_ips.append(job.ip)
+
+            # Save checkpoint after each IP
+            save_checkpoint(self.cfg.output_dir, completed_ips=completed_ips,
+                            stage="ip_done", context={"last_ip": job.ip})
 
         self._total_elapsed = time.perf_counter() - self._pipeline_start
+
+        # Clear checkpoint — pipeline completed successfully
+        clear_checkpoint(self.cfg.output_dir)
 
         # Print summary
         self._print_summary()
@@ -117,11 +221,11 @@ class BatchRunner:
 
     def _run_one(self, job: IPJob) -> IPResult:
         """Run the full pipeline for one IP."""
-        print(f"\n{'=' * 70}")
-        print(f"  IP: {job.ip}")
-        print(f"  old: {job.old_sfr.name}  new: {job.new_sfr.name}  lld: {job.lld.name}")
-        print(f"  out: {job.out_lld}")
-        print(f"{'=' * 70}")
+        logger.info("=" * 70)
+        logger.info(f"  IP: {job.ip}")
+        logger.info(f"  old: {job.old_sfr.name}  new: {job.new_sfr.name}  lld: {job.lld.name}")
+        logger.info(f"  out: {job.out_lld}")
+        logger.info("=" * 70)
 
         result = IPResult(
             ip=job.ip,
@@ -148,13 +252,13 @@ class BatchRunner:
 
         try:
             # Step 1: Classify changes
-            print(f"\n  [1/5] Diff & Classify {job.ip}...")
+            logger.info(f"  [1/5] Diff & Classify {job.ip}...")
             all_changes = classify_sfr_diff(job.old_sfr, job.new_sfr, ip=job.ip)
             result.n_changes = len(all_changes)
-            print(f"  {summarize_changes(all_changes).replace(chr(10), chr(10) + '  ')}")
+            logger.info(f"  {summarize_changes(all_changes).replace(chr(10), chr(10) + '  ')}")
 
             if not all_changes:
-                print(f"  [SKIP] No changes detected for {job.ip} -- lld.h is up to date.")
+                logger.info(f"  [SKIP] No changes detected for {job.ip} -- lld.h is up to date.")
                 shutil.copy2(job.lld, job.out_lld)
                 result.status = "SKIP"
                 return result
@@ -171,11 +275,11 @@ class BatchRunner:
                 for cr in manual_crs
             ]
             if manual_items:
-                print(f"  [MANUAL-REVIEW] {len(manual_items)} items skipped: {', '.join(manual_items[:3])}"
+                logger.warning(f"  [MANUAL-REVIEW] {len(manual_items)} items skipped: {', '.join(manual_items[:3])}"
                       + ("..." if len(manual_items) > 3 else ""))
 
             # Step 2: Copy LLD to output_dir, patch in-place
-            print(f"\n  [2/5] Patch {job.ip} LLD ({len(auto_crs)} auto-patchable changes)...")
+            logger.info(f"  [2/5] Patch {job.ip} LLD ({len(auto_crs)} auto-patchable changes)...")
             shutil.copy2(job.lld, job.out_lld)
 
             parser       = SfrParser(ip=job.ip)
@@ -193,7 +297,7 @@ class BatchRunner:
                 new_ir   = new_ir,
                 out_path = job.out_lld,
             )
-            print(f"  Patched LLD written -> {job.out_lld}")
+            logger.debug(f"  Patched LLD written -> {job.out_lld}")
 
             # Write test file
             test_file    = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
@@ -208,28 +312,29 @@ class BatchRunner:
                 lld_text   = lld_text,
             )
             mode_tag = "[LLM+Template fallback]" if llm_test_gen else "[Template]"
-            print(f"  Test file written  -> {test_file}  {mode_tag}")
+            logger.debug(f"  Test file written  -> {test_file}  {mode_tag}")
 
             # Step 3: Compile check
-            print(f"\n  [3/5] Compile-check {job.ip}...")
+            logger.info(f"  [3/5] Compile-check {job.ip}...")
             compile_result = run_compile_check(
                 test_file  = test_file,
                 sfr_new    = job.new_sfr,
                 lld_file   = job.out_lld,
                 llm_client = llm,
-                gcc_exe    = self.cfg.gcc,
+                gcc_exe    = gcc_exe,
+                required   = self.cfg.compile_check,
             )
             result.compile_ok = compile_result.success
             if compile_result.success:
-                print(f"  [OK] Compile passed for {job.ip}")
+                logger.info(f"  [OK] Compile passed for {job.ip}")
             else:
-                print(f"  [WARN] Compile failed for {job.ip} "
+                logger.warning(f"  [WARN] Compile failed for {job.ip} "
                       f"(needs_review={compile_result.needs_review})")
 
             # Step 4: Cross-LLD reference scan
             cross_ref_md = ""
             if cross_lld_scan and self.cfg.lld_dir.exists():
-                print(f"\n  [4/5] Cross-LLD scan for {job.ip}...")
+                logger.info(f"  [4/5] Cross-LLD scan for {job.ip}...")
                 # Build function names of changed fields to scan for
                 changed_fn_names = []
                 for cr in auto_crs:
@@ -248,13 +353,13 @@ class BatchRunner:
                     )
                     cross_ref_md = format_cross_ref_report(cross_refs)
                     if cross_refs:
-                        print(f"  [CROSS-REF] Found callers in "
-                              f"{len(cross_refs)} file(s) — flagged in PR description")
+                        logger.info(f"  [CROSS-REF] Found callers in "
+                              f"{len(cross_refs)} file(s) -- flagged in PR description")
             else:
-                print(f"\n  [4/5] Cross-LLD scan skipped")
+                logger.info("  [4/5] Cross-LLD scan skipped")
 
             # Step 5: Stage PR
-            print(f"\n  [5/5] Stage PR for {job.ip}...")
+            logger.info(f"  [5/5] Stage PR for {job.ip}...")
             all_manual = manual_items + (compile_result.needs_review or [])
             stage_pr(
                 ip                  = job.ip,
@@ -290,34 +395,34 @@ class BatchRunner:
                 )
                 if rc.returncode == 0:
                     sha = rc.stdout.strip().split("[")[-1].split(" ")[0] if "[" in rc.stdout else ""
-                    print(f"  [GIT] Committed {job.ip}: {sha}")
+                    logger.debug(f"  [GIT] Committed {job.ip}: {sha}")
                 else:
-                    print(f"  [GIT-WARN] Commit skipped: {rc.stderr.strip()[:80]}")
+                    logger.warning(f"  [GIT-WARN] Commit skipped: {rc.stderr.strip()[:80]}")
 
             result.status = "OK"
 
         except Exception as exc:
             result.status = "FAIL"
             result.error  = str(exc)
-            print(f"  [ERROR] {job.ip}: {exc}")
+            logger.error(f"  [ERROR] {job.ip}: {exc}")
 
         return result
 
     def _print_summary(self) -> None:
         """Print final summary table with timing."""
-        print("\n" + "=" * 70)
-        print("  BATCH SUMMARY")
-        print("=" * 70)
-        print(f"  {'IP':<12} {'Status':<8} {'Changes':<10} {'Time':>7}  {'Output LLD'}")
-        print(f"  {'-'*12} {'-'*8} {'-'*10} {'-'*7}  {'-'*35}")
+        logger.info("=" * 70)
+        logger.info("  BATCH SUMMARY")
+        logger.info("=" * 70)
+        logger.info(f"  {'IP':<12} {'Status':<8} {'Changes':<10} {'Time':>7}  {'Output LLD'}")
+        logger.info(f"  {'-'*12} {'-'*8} {'-'*10} {'-'*7}  {'-'*35}")
 
         ok = warn = fail = skip = 0
         for r in self._results:
             icon = {"OK": "[OK]  ", "WARN": "[WARN]", "FAIL": "[FAIL]", "SKIP": "[SKIP]"}.get(r.status, "     ")
             elapsed_str = f"{r.elapsed_s:.1f}s"
-            print(f"  {r.ip:<12} {icon:<8} {r.n_changes:<10} {elapsed_str:>7}  {r.lld_out.name}")
+            logger.info(f"  {r.ip:<12} {icon:<8} {r.n_changes:<10} {elapsed_str:>7}  {r.lld_out.name}")
             if r.error:
-                print(f"    Error: {r.error}")
+                logger.error(f"    Error: {r.error}")
             if r.status == "OK":   ok   += 1
             if r.status == "WARN": warn += 1
             if r.status == "FAIL": fail += 1
@@ -326,12 +431,12 @@ class BatchRunner:
         total_elapsed = getattr(self, "_total_elapsed", 0.0)
         total_m, total_s = divmod(int(total_elapsed), 60)
 
-        print("-" * 70)
-        print(f"  Total: {len(self._results)}  OK={ok}  WARN={warn}  FAIL={fail}  SKIP={skip}")
-        print(f"\n  Patched LLD files -> {self.cfg.output_dir}")
-        print(f"  Test files        -> {self.cfg.tests_dir}")
-        print(f"  Pipeline time     : {total_m}m {total_s:02d}s  ({total_elapsed:.2f}s)")
-        print("=" * 70)
+        logger.info("-" * 70)
+        logger.info(f"  Total: {len(self._results)}  OK={ok}  WARN={warn}  FAIL={fail}  SKIP={skip}")
+        logger.info(f"  Patched LLD files -> {self.cfg.output_dir}")
+        logger.info(f"  Test files        -> {self.cfg.tests_dir}")
+        logger.info(f"  Pipeline time     : {total_m}m {total_s:02d}s  ({total_elapsed:.2f}s)")
+        logger.info("=" * 70)
 
 
 # ---------------------------------------------------------------------------

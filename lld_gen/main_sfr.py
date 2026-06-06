@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -38,6 +39,7 @@ from pathlib import Path
 # Ensure project root is on sys.path when run as python -m lld_gen.main_sfr
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from lld_gen import setup_logging
 from lld_gen.sfr_diff_analyzer import (
     SfrDiffAnalyzer, SfrParser, classify_sfr_diff,
     changes_to_json, summarize_changes,
@@ -48,6 +50,8 @@ from lld_gen.compile_check import run_compile_check
 from lld_gen.pr_stage import stage_pr
 from lld_gen.config import load_config, discover_jobs, load_workflow_config
 from lld_gen.batch_runner import BatchRunner
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +259,8 @@ def _cmd_run_config(args: argparse.Namespace) -> None:
         cfg.no_llm = True
     if args.no_git:
         cfg.no_git = True
+    if getattr(args, "force_no_llm", False):
+        cfg.force_no_llm = True
 
     runner  = BatchRunner(cfg)
     results = runner.run()   # timing printed inside run()
@@ -531,6 +537,8 @@ def _cmd_workflow(args: argparse.Namespace) -> None:
         cfg.no_llm = True
     if args.no_git:
         cfg.no_git = True
+    if getattr(args, "force_no_llm", False):
+        cfg.force_no_llm = True
 
     runner = WorkflowRunner(cfg)
 
@@ -634,6 +642,7 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--lld",     required=True, metavar="FILE", help="Existing lld.h")
     r.add_argument("--ip",      default="",   metavar="NAME",  help="Peripheral IP name (auto-detected from filename if omitted)")
     r.add_argument("--no-llm",  action="store_true", help="Disable LLM")
+    r.add_argument("--force-no-llm", action="store_true", help="Skip LLM prompt, proceed in template mode silently if unavailable")
     r.add_argument("--no-git",  action="store_true", help="Skip git add")
     r.add_argument("--gcc",     default=None,  metavar="EXE")
     r.add_argument("--hf-token",default="",   metavar="TOKEN")
@@ -648,6 +657,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to lld_patcher.yaml config file (default: lld_patcher.yaml)",
     )
     rc.add_argument("--no-llm", action="store_true", help="Override config: disable LLM")
+    rc.add_argument("--force-no-llm", action="store_true", help="Override config: skip LLM prompt")
     rc.add_argument("--no-git", action="store_true", help="Override config: skip git add")
 
     # ── init-config (generate starter config) ────────────────────────────────
@@ -671,6 +681,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to workflow_config.yaml (default: workflow_config.yaml)",
     )
     wf.add_argument("--no-llm",  action="store_true", help="Override: disable LLM")
+    wf.add_argument("--force-no-llm", action="store_true", help="Override: skip LLM prompt")
     wf.add_argument("--no-git",  action="store_true", help="Override: skip git/PR")
     wf.add_argument("--dry-run", action="store_true", help="Clone + diff only, no patch")
 
@@ -691,6 +702,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
+
+    # Set up logging from CLI flags
+    log_level = logging.DEBUG if getattr(args, 'verbose', False) else logging.INFO
+    log_file  = getattr(args, 'log_file', '') or ''
+    setup_logging(level=log_level, log_file=log_file)
 
     dispatch = {
         "diff":                  _cmd_diff,

@@ -19,7 +19,7 @@ SAMPLE = Path(__file__).parent / "sample_regs.xlsx"
 @pytest.fixture(scope="module", autouse=True)
 def ensure_sample():
     if not SAMPLE.exists():
-        from tests.create_sample_excel import create_sample
+        from .create_sample_excel import create_sample
         create_sample(SAMPLE)
 
 
