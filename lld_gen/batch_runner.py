@@ -331,10 +331,11 @@ class BatchRunner:
                 logger.warning(f"  [WARN] Compile failed for {job.ip} "
                       f"(needs_review={compile_result.needs_review})")
 
-            # Step 4: Cross-LLD reference scan
+            # Step 4: Cross-LLD reference scan and AST refactoring
             cross_ref_md = ""
+            ast_patched_files = []
             if cross_lld_scan and self.cfg.lld_dir.exists():
-                logger.info(f"  [4/5] Cross-LLD scan for {job.ip}...")
+                logger.info(f"  [4/5] Cross-LLD scan and AST refactoring for {job.ip}...")
                 # Build function names of changed fields to scan for
                 changed_fn_names = []
                 for cr in auto_crs:
@@ -355,6 +356,16 @@ class BatchRunner:
                     if cross_refs:
                         logger.info(f"  [CROSS-REF] Found callers in "
                               f"{len(cross_refs)} file(s) -- flagged in PR description")
+
+                from lld_gen.ast_refactor import refactor_cross_references
+                ast_patched_files = refactor_cross_references(
+                    cfg       = self.cfg,
+                    ip        = job.ip,
+                    new_ir    = new_ir,
+                    auto_crs  = auto_crs,
+                    out_lld   = job.out_lld,
+                    test_file = test_file,
+                )
             else:
                 logger.info("  [4/5] Cross-LLD scan skipped")
 
@@ -378,7 +389,7 @@ class BatchRunner:
             # Atomic git commit: one commit per SFR file changed
             if not no_git and atomic_commits:
                 import subprocess as _sp
-                commit_files = [str(job.out_lld), str(test_file)]
+                commit_files = [str(job.out_lld), str(test_file)] + [str(p) for p in ast_patched_files]
                 pr_desc_path = job.out_lld.parent / "PR_DESCRIPTION.md"
                 if pr_desc_path.exists():
                     commit_files.append(str(pr_desc_path))

@@ -382,6 +382,21 @@ class WorkflowRunner:
                 )
                 result.cross_ref_files = [str(p) for p in cross_refs.keys()]
 
+        # ── F2: AST-Based Cross-Refactoring ──────────────────────────────────
+        ast_patched_files = []
+        if cfg.cross_lld_scan:
+            from lld_gen.ast_refactor import refactor_cross_references
+            logger.info(f"  [F2] Running AST-based cross-refactoring for IP={ip}...")
+            ast_patched_files = refactor_cross_references(
+                cfg       = cfg,
+                ip        = ip,
+                new_ir    = new_ir,
+                auto_crs  = auto_crs,
+                out_lld   = out_lld,
+                test_file = test_file,
+            )
+            result.cross_ref_files = list(set(result.cross_ref_files + [str(p) for p in ast_patched_files]))
+
         # ── G: Stage PR description ───────────────────────────────────────────
         cross_ref_md = format_cross_ref_report(cross_refs)
         pr_desc = build_pr_description(
@@ -413,7 +428,7 @@ class WorkflowRunner:
                 f"Compile: {'OK' if result.compile_ok else 'NEEDS_REVIEW'}\n"
                 f"\nChange summary:\n{result.change_summary}"
             )
-            files_to_commit = [out_lld, test_file, pr_desc_path]
+            files_to_commit = [out_lld, test_file, pr_desc_path] + ast_patched_files
             result.commit_sha = self._lld_gm.commit(files_to_commit, commit_msg) or ""
 
         result.status = "OK" if compile_result.success else "WARN"
