@@ -206,7 +206,7 @@ class BatchRunner:
                 continue
 
             ip_start = time.perf_counter()
-            result = self._run_one(job)
+            result = self._run_one(job, gcc_exe=gcc_exe)
             result.elapsed_s = time.perf_counter() - ip_start
             self._results.append(result)
             completed_ips.append(job.ip)
@@ -224,7 +224,7 @@ class BatchRunner:
         self._print_summary()
         return self._results
 
-    def _run_one(self, job: IPJob) -> IPResult:
+    def _run_one(self, job: IPJob, gcc_exe: Optional[str] = None) -> IPResult:
         """Run the full pipeline for one IP."""
         logger.info("=" * 70)
         logger.info(f"  IP: {job.ip}")

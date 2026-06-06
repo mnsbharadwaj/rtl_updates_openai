@@ -20,43 +20,43 @@
 /** @brief DMA enable */
 static inline uint8_t lld_pmu_pmu_con_dma_en_get(struct lld_pmu *lld)
 {
-    return (uint8_t)(lld->pSFR->stPMU_CON.stNative.DMA_EN);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.DMA_EN);
 }
 
 /** @brief DMA enable */
 static inline void lld_pmu_pmu_con_dma_en_set(struct lld_pmu *lld, uint8_t val)
 {
-    lld->pSFR->stPMU_CON.stNative.DMA_EN = val;
+    lld->pSFR->stPMU_CTRL.stNative.DMA_EN = val;
 }
 
 /** @brief DMA pass status */
 static inline uint8_t lld_pmu_pmu_con_dma_pass_get(struct lld_pmu *lld)
 {
-    return (uint8_t)(lld->pSFR->stPMU_CON.stNative.DMA_PASS);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.DMA_PASS);
 }
 
 /** @brief HCPU reset control */
 static inline uint8_t lld_pmu_pmu_con_hcpu_rst_get(struct lld_pmu *lld)
 {
-    return (uint8_t)(lld->pSFR->stPMU_CON.stNative.HCPU_RST);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.HCPU_RST);
 }
 
 /** @brief HCPU reset control */
 static inline void lld_pmu_pmu_con_hcpu_rst_set(struct lld_pmu *lld, uint8_t val)
 {
-    lld->pSFR->stPMU_CON.stNative.HCPU_RST = val;
+    lld->pSFR->stPMU_CTRL.stNative.HCPU_RST = val;
 }
 
 /** @brief HCPU vector init */
 static inline uint8_t lld_pmu_pmu_con_hcpu_vinit_get(struct lld_pmu *lld)
 {
-    return (uint8_t)(lld->pSFR->stPMU_CON.stNative.HCPU_VINIT);
+    return (uint8_t)(lld->pSFR->stPMU_CTRL.stNative.HCPU_VINIT);
 }
 
 /** @brief HCPU vector init */
 static inline void lld_pmu_pmu_con_hcpu_vinit_set(struct lld_pmu *lld, uint8_t val)
 {
-    lld->pSFR->stPMU_CON.stNative.HCPU_VINIT = val;
+    lld->pSFR->stPMU_CTRL.stNative.HCPU_VINIT = val;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -68,13 +68,13 @@ static inline void lld_pmu_pmu_con_hcpu_vinit_set(struct lld_pmu *lld, uint8_t v
 /** @brief DMA done flag */
 static inline uint8_t lld_pmu_status_con_done_get(struct lld_pmu *lld)
 {
-    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.DONE);
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.COMPLETE);
 }
 
 /** @brief DMA done flag */
 static inline void lld_pmu_status_con_done_clear(struct lld_pmu *lld)
 {
-    lld->pSFR->stSTATUS_CON.stNative.DONE = 1U; /* W1C: write 1 to clear */
+    lld->pSFR->stSTATUS_CON.stNative.COMPLETE = 1U; /* W1C: write 1 to clear */
 }
 
 /** @brief DMA error flag */
