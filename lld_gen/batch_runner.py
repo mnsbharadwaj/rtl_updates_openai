@@ -152,7 +152,12 @@ class BatchRunner:
         force_no_llm = getattr(self.cfg, "force_no_llm", False)
         if not self.cfg.no_llm and not force_no_llm:
             # Quick probe: create a temp LLM client to check availability
-            _test_llm = LLMClient(hf_token="", ollama_model=self.cfg.ollama_model or "")
+            from lld_gen.llm_client import load_llm_config
+            _test_llm = LLMClient(load_llm_config({
+                "no_llm": False,
+                "hf_token": self.cfg.hf_token or "",
+                "ollama_model": self.cfg.ollama_model or "",
+            }))
             if not _test_llm.available:
                 logger.warning("=" * 70)
                 logger.warning("  [!]  LLM BACKEND NOT AVAILABLE")
@@ -285,10 +290,13 @@ class BatchRunner:
             parser       = SfrParser(ip=job.ip)
             new_ir       = parser.parse_file(job.new_sfr)
             ollama_model = str(overrides.get("ollama_model", self.cfg.ollama_model) or "")
-            llm = LLMClient(
-                hf_token     = hf_token,
-                ollama_model = ollama_model,
-            ) if not no_llm else LLMClient(hf_token="", ollama_model="")
+            from lld_gen.llm_client import load_llm_config
+            llm_cfg = load_llm_config({
+                "no_llm": no_llm,
+                "hf_token": hf_token,
+                "ollama_model": ollama_model,
+            })
+            llm = LLMClient(llm_cfg)
             patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
 
             patcher.patch(

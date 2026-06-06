@@ -125,6 +125,16 @@ static inline void lld_pmu_status_con_thresh_set(struct lld_pmu *lld, uint8_t va
     lld->pSFR->stSTATUS_CON.stNative.THRESH = val;
 }
 
+static inline uint8_t lld_pmu_status_con_abort_get(struct lld_pmu *lld)
+{
+    return (uint8_t)(lld->pSFR->stSTATUS_CON.stNative.ABORT);
+}
+
+static inline void lld_pmu_status_con_abort_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stSTATUS_CON.stNative.ABORT = val;
+}
+
 /** @brief DMA error flag */
 static inline void lld_pmu_status_con_err_set(struct lld_pmu *lld, uint8_t val)
 {
@@ -160,29 +170,37 @@ static inline void lld_pmu_clk_con_clk_en_set(struct lld_pmu *lld, uint8_t val)
     lld->pSFR->stCLK_CON.stNative.CLK_EN = val;
 }
 
-/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
-static inline uint8_t lld_pmu_clk_con_clk_sel_get(struct lld_pmu *lld)
-{
-    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_SEL);
-}
-
-/** @brief Clock source mux: 0=PLL0 1=PLL1 2=OSC 3=EXT */
-static inline void lld_pmu_clk_con_clk_sel_set(struct lld_pmu *lld, uint8_t val)
-{
-    lld->pSFR->stCLK_CON.stNative.CLK_SEL = val;
-}
-
-/** @brief Power gate status (read-only in v2) */
 static inline uint8_t lld_pmu_clk_con_clk_gate_get(struct lld_pmu *lld)
 {
     return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_GATE);
 }
 
-/* ⚠ DEPRECATED: SFR register SWT_CON was DELETED in the new SFR version.
- * The functions below are no longer backed by hardware registers.
- * They are kept here to avoid compilation errors in IP emulation files.
- * Review the callers and MANUALLY DELETE these functions in a follow-up PR.
- * See PR_DESCRIPTION.md for the full list. */
+static inline void lld_pmu_clk_con_clk_gate_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stCLK_CON.stNative.CLK_GATE = val;
+}
+
+/**
+ * @brief Clock source select signal
+ *
+ * @param lld Pointer to the PMU device structure
+ * @return uint8_t Current value of the CLK_SEL field
+ */
+static inline uint8_t lld_pmu_clk_con_clk_sel_get(struct lld_pmu *lld)
+{
+    return (uint8_t)(lld->pSFR->stCLK_CON.stNative.CLK_SEL);
+}
+
+/**
+ * @brief Clock source select signal
+ *
+ * @param lld Pointer to the PMU device structure
+ * @param val New value for the CLK_SEL field
+ */
+static inline void lld_pmu_clk_con_clk_sel_set(struct lld_pmu *lld, uint8_t val)
+{
+    lld->pSFR->stCLK_CON.stNative.CLK_SEL = val;
+}
 /* ═══════════════════════════════════════════════════════════════
  * REGISTER: SWT_CON                        offset=0x000C
  * 
@@ -232,63 +250,5 @@ static inline void lld_pmu_rst_con_ret_con_set(struct lld_pmu *lld, uint32_t val
 }
 
 /* === END LLD_PMU === */
-
-
-/* ═══════════════════════════════════════════════════════════════
- * REGISTER: IRQ_CON                        offset=0x0010
- * 
- * SRC_SHA: d1d0723d0ea2949d
- * ═══════════════════════════════════════════════════════════════ */
-
-/** @brief IRQ enable */
-static inline uint8_t lld_pmu_irq_con_irq_en_get(struct lld_pmu *lld)
-{
-    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_EN);
-}
-
-/** @brief IRQ enable */
-static inline void lld_pmu_irq_con_irq_en_set(struct lld_pmu *lld, uint8_t val)
-{
-    lld->pSFR->stIRQ_CON.stNative.IRQ_EN = val;
-}
-
-static inline void lld_pmu_irq_con_irq_en_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 1U; }
-static inline void lld_pmu_irq_con_irq_en_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 0U; }
-static inline uint32_t lld_pmu_irq_con_irq_en_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_EN); }
-static inline void lld_pmu_irq_con_irq_en_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_EN = 1U; } /* W1C */
-
-/** @brief IRQ mask bits */
-static inline uint8_t lld_pmu_irq_con_irq_mask_get(struct lld_pmu *lld)
-{
-    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_MASK);
-}
-
-/** @brief IRQ mask bits */
-static inline void lld_pmu_irq_con_irq_mask_set(struct lld_pmu *lld, uint8_t val)
-{
-    lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = val;
-}
-
-static inline void lld_pmu_irq_con_irq_mask_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 1U; }
-static inline void lld_pmu_irq_con_irq_mask_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 0U; }
-static inline uint32_t lld_pmu_irq_con_irq_mask_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_MASK); }
-static inline void lld_pmu_irq_con_irq_mask_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_MASK = 1U; } /* W1C */
-
-/** @brief IRQ pending flag */
-static inline uint8_t lld_pmu_irq_con_irq_pend_get(struct lld_pmu *lld)
-{
-    return (uint8_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_PEND);
-}
-
-/** @brief IRQ pending flag */
-static inline void lld_pmu_irq_con_irq_pend_clear(struct lld_pmu *lld)
-{
-    lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; /* W1C: write 1 to clear */
-}
-
-static inline void lld_pmu_irq_con_irq_pend_irq_enable(struct lld_pmu *lld)  { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; }
-static inline void lld_pmu_irq_con_irq_pend_irq_disable(struct lld_pmu *lld) { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 0U; }
-static inline uint32_t lld_pmu_irq_con_irq_pend_irq_status(struct lld_pmu *lld) { return (uint32_t)(lld->pSFR->stIRQ_CON.stNative.IRQ_PEND); }
-static inline void lld_pmu_irq_con_irq_pend_irq_clear(struct lld_pmu *lld)   { lld->pSFR->stIRQ_CON.stNative.IRQ_PEND = 1U; } /* W1C */
 
 #endif /* LLD_PMU_H */

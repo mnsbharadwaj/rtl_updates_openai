@@ -33,7 +33,7 @@ llm_test_gen: true
 # -----------------------------------------------------------------------
 # Compiler settings
 # -----------------------------------------------------------------------
-gcc: null            # Path to gcc (null = auto-search PATH)
+gcc: "C:/Users/pavan/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gcc.exe"            # Path to gcc (null = auto-search PATH)
 
 # -----------------------------------------------------------------------
 # Optional: Restrict which IPs to process (comment out to process all)

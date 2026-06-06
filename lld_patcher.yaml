@@ -50,7 +50,7 @@ github_url: "https://github.com/mnsbharadwaj/rtl_updates_openai"
 # ---------------------------------------------------------------------------
 # Compiler settings
 # ---------------------------------------------------------------------------
-gcc: null                        # Path to gcc (null = search PATH automatically)
+gcc: "C:/Users/pavan/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gcc.exe"                        # Path to gcc (null = search PATH automatically)
 
 # ---------------------------------------------------------------------------
 # Optional: Per-IP overrides (override global settings for specific IPs)

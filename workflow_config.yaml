@@ -110,7 +110,7 @@ no_git: false
 # -----------------------------------------------------------------------------
 # [E] Compiler
 # -----------------------------------------------------------------------------
-gcc: null     # null = auto-detect from PATH
+gcc: "C:/Users/pavan/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gcc.exe"     # null = auto-detect from PATH
               # Windows: choco install mingw   or   winget install GnuWin32.GCC
 
 # -----------------------------------------------------------------------------

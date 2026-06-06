@@ -108,14 +108,15 @@ def run_comparison(ip: str, model: str) -> None:
     print(f"{'='*70}\n")
 
     # ── Load LLM client ──────────────────────────────────────────────────────
-    llm = LLMClient(ollama_model=model)
+    from lld_gen.llm_client import load_llm_config
+    llm = LLMClient(load_llm_config({"ollama_model": model}))
     if not llm.available:
         print(f"[ERROR] Ollama model '{model}' not available.")
         print(f"  Make sure Ollama is running:  ollama serve")
         print(f"  And the model is pulled:      ollama pull {model}")
         sys.exit(1)
 
-    print(f"[LLM] Backend: {llm.backend}  model: {llm._ollama_model}\n")
+    print(f"[LLM] Backend: {llm.cfg.backend}  model: {llm.cfg.model}\n")
 
     # ── Parse SFRs ──────────────────────────────────────────────────────────
     changes = classify_sfr_diff(OLD_SFR, NEW_SFR, ip=ip)
@@ -139,7 +140,7 @@ def run_comparison(ip: str, model: str) -> None:
         f"# LLM vs Template Comparison Report",
         f"",
         f"- **IP:** {ip}",
-        f"- **Ollama model:** {llm._ollama_model}",
+        f"- **Ollama model:** {llm.cfg.model}",
         f"- **Old SFR:** `{OLD_SFR.name}`",
         f"- **New SFR:** `{NEW_SFR.name}`",
         f"",

@@ -478,12 +478,17 @@ def _cmd_init_config(args: argparse.Namespace) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 def _make_llm(args: argparse.Namespace) -> LLMClient:
+    from lld_gen.llm_client import load_llm_config
     if getattr(args, "no_llm", False):
-        return LLMClient(hf_token="")   # no-op client
+        return LLMClient(load_llm_config({"no_llm": True}))
     token = getattr(args, "hf_token", None) or os.environ.get("HF_TOKEN", "")
-    client = LLMClient(hf_token=token)
+    cfg = load_llm_config({
+        "hf_token": token,
+        "ollama_model": os.environ.get("OLLAMA_MODEL", ""),
+    })
+    client = LLMClient(cfg)
     if not client.available:
-        print("[LLM] WARNING: HF_TOKEN not set -- LLM calls will use template fallback")
+        print("[LLM] WARNING: HF_TOKEN and OLLAMA_MODEL not set -- LLM calls will use template fallback")
     return client
 
 
