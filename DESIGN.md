@@ -397,6 +397,22 @@ The system utilizes regular expressions and surgical text matching instead of a 
 - **Zero-Dependency Portability:** Using AST parsers like Clang bindings requires platform-specific compilation binaries and native libraries. The Python regex-based approach has zero dependencies and runs out-of-the-box on any developer environment or CI/CD agent.
 - **Performance and Simplicity:** Scanning files with light regular expressions is orders of magnitude faster than building and traversing an AST, while dramatically simplifying the code generator codebase.
 
+### 4.9 Multi-IP Access & AST Refactoring (Complex Cross-References)
+
+**Problem Scenario:**
+In advanced Low-Level Drivers, a single driver source file (e.g., `lld_ip1.c`) might need to coordinate power, clock gating, or interrupts across multiple hardware blocks. Consequently, it accesses the SFRs of multiple peripherals (e.g., accessing registers from `sfr_ip1.h`, `sfr_ip2.h`, and `sfr_ip3.h` simultaneously). In this scenario, the simple one-to-one filename mapping (`sfr_ip1.h` <-> `lld_ip1.h`) breaks down, as changes in `sfr_ip2.h` must propagate to `lld_ip1.c`.
+
+**Why AST is required for this use case:**
+While regex and filename mapping work well for isolated, one-to-one driver files, they cannot resolve cross-IP references in arbitrary source files because:
+1. **Lack of Type Resolution:** A regex scanner cannot easily determine if `lld->pSFR->stPMU_CON` refers to the target IP structure if the pointer names and types vary.
+2. **Many-to-Many Mappings:** A change in a single SFR register needs to trigger surgical patches across multiple unrelated source files.
+
+An **AST-based C Refactoring engine** (using tools like `libclang` or `pycparser`) would resolve this by:
+1. **Pre-processing and Parsing:** Parsing the entire driver codebase with all includes to build a complete Abstract Syntax Tree.
+2. **Symbol Resolution:** Building a symbol table to resolve the type of every pointer and structure (e.g., resolving `lld->pSFR` to `SFR_PMU*`).
+3. **Member Access Resolution:** Traversing the AST to find all `MemberExpr` nodes (e.g., accesses to `.stPMU_CON` or `.DMA_EN`).
+4. **Surgical Source Rewriting:** Matching those nodes to the classified `ChangeRecord` list, and using source location coordinates (file, line, column) to rewrite the affected expressions in place, regardless of which file they reside in.
+
 ---
 
 ## 5. How to Use — Template Mode (No LLM)
