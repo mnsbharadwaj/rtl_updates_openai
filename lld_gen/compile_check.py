@@ -145,6 +145,73 @@ def _patch_function_in_lld(lld_path: Path, fn_name: str, fixed_code: str) -> boo
     return True
 
 
+def run_test_execution(
+    gcc_exe: str,
+    test_file: Path,
+    sfr_new: Path,
+    lld_file: Path,
+    extra_includes: Optional[List[str]] = None,
+) -> Tuple[bool, str]:
+    """
+    Compiles the test file into a native executable and runs it to execute assertions.
+    Returns (success, message).
+    """
+    import tempfile
+    import os
+
+    suffix = ".exe" if os.name == "nt" else ""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        exe_path = tmp.name
+
+    cmd = [
+        gcc_exe,
+        "-std=c11",
+        "-x", "c",
+        f"-I{sfr_new.parent}",
+        f"-I{lld_file.parent}",
+    ]
+    if extra_includes:
+        for inc in extra_includes:
+            cmd.extend(["-I", inc])
+
+    cmd.extend([str(test_file), "-o", exe_path])
+
+    try:
+        # 1. Compile and link
+        logger.debug("[COMPILE-TEST] Running: %s", " ".join(cmd))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            if os.path.exists(exe_path):
+                try: os.remove(exe_path)
+                except Exception: pass
+            return False, f"Compilation/link failed: {proc.stderr}"
+
+        # 2. Run assertions
+        logger.debug("[RUN-TEST] Executing: %s", exe_path)
+        run_proc = subprocess.run([exe_path], capture_output=True, text=True, timeout=10)
+
+        # Cleanup
+        if os.path.exists(exe_path):
+            try: os.remove(exe_path)
+            except Exception: pass
+
+        if run_proc.returncode != 0:
+            err_msg = run_proc.stderr or run_proc.stdout or f"exit code {run_proc.returncode}"
+            return False, f"Runtime assertions failed: {err_msg.strip()}"
+
+        return True, "All generated unit test assertions passed successfully!"
+    except OSError as e:
+        if os.path.exists(exe_path):
+            try: os.remove(exe_path)
+            except Exception: pass
+        return False, f"Execution failed (possible cross-compilation target): {e}"
+    except Exception as e:
+        if os.path.exists(exe_path):
+            try: os.remove(exe_path)
+            except Exception: pass
+        return False, f"Error running tests: {e}"
+
+
 def run_compile_check(
     test_file:   str | Path,
     sfr_new:     str | Path,
@@ -201,7 +268,21 @@ def run_compile_check(
         result.success = True
         result.stdout  = stdout
         result.stderr  = stderr
-        logger.info("[COMPILE] OK")
+        logger.info("[COMPILE] Syntax check OK")
+
+        # Perform functional unit test execution
+        logger.info("[TEST] Running generated functional unit tests for %s ...", lld_file.name)
+        ok, msg = run_test_execution(gcc_exe, test_file, sfr_new, lld_file, extra_includes)
+        if ok:
+            logger.info("[TEST] %s", msg)
+        else:
+            if "execution failed" in msg.lower() or "exec format error" in msg.lower():
+                logger.warning("[TEST] Skipped functional execution (possible cross-compilation target): %s", msg)
+            else:
+                logger.error("[TEST] FAIL: %s", msg)
+                result.success = False
+                result.stderr += f"\n[Functional Test Failure]\n{msg}"
+                result.needs_review = ["<functional_test_failure>"]
         return result
 
     # Failure path

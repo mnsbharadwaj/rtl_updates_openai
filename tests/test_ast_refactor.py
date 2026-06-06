@@ -199,3 +199,79 @@ static inline void lld_clk_check_pmu(struct lld_clk *clk, struct lld_pmu *lld) {
         assert "stPLL_CTRL" in clk_text
         assert "stPLL_CON" not in clk_text
 
+
+def test_ast_run_test_execution():
+    """Verify that run_test_execution compiles and runs assertions successfully."""
+    sfr_code = """
+#ifndef SFR_PMU_H
+#define SFR_PMU_H
+#include <stdint.h>
+typedef volatile union {
+    struct {
+        volatile uint32_t DMA_EN : 1;
+        volatile uint32_t RSVD   : 31;
+    } stNative;
+    uint32_t u32Val;
+} SFR_PMU_CON;
+
+typedef struct {
+    SFR_PMU_CON stPMU_CON;
+} SFR_PMU;
+#endif
+"""
+
+    lld_code = """
+#ifndef LLD_PMU_H
+#define LLD_PMU_H
+#include "sfr_pmu.h"
+struct lld_pmu { SFR_PMU *pSFR; };
+
+static inline uint8_t lld_pmu_dma_en_get(struct lld_pmu *lld) {
+    return (uint8_t)lld->pSFR->stPMU_CON.stNative.DMA_EN;
+}
+static inline void lld_pmu_dma_en_set(struct lld_pmu *lld, uint8_t val) {
+    lld->pSFR->stPMU_CON.stNative.DMA_EN = val;
+}
+#endif
+"""
+
+    test_code = """
+#include <assert.h>
+#include "sfr_pmu.h"
+#include "lld_pmu.h"
+
+int main(void) {
+    SFR_PMU sfr = {0};
+    struct lld_pmu lld = { .pSFR = &sfr };
+    
+    // Initial value
+    assert(lld_pmu_dma_en_get(&lld) == 0);
+    
+    // Set and check
+    lld_pmu_dma_en_set(&lld, 1);
+    assert(lld_pmu_dma_en_get(&lld) == 1);
+    
+    return 0;
+}
+"""
+    from lld_gen.compile_check import _find_gcc, run_test_execution
+    try:
+        gcc_exe = _find_gcc()
+    except Exception:
+        pytest.skip("gcc not available for testing execution")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sfr_path = Path(tmpdir) / "sfr_pmu.h"
+        lld_path = Path(tmpdir) / "lld_pmu.h"
+        test_path = Path(tmpdir) / "test_pmu.c"
+        
+        sfr_path.write_text(sfr_code, encoding="utf-8")
+        lld_path.write_text(lld_code, encoding="utf-8")
+        test_path.write_text(test_code, encoding="utf-8")
+        
+        ok, msg = run_test_execution(gcc_exe, test_path, sfr_path, lld_path)
+        assert ok, f"Expected compilation/execution success, got: {msg}"
+        assert "All generated unit test assertions passed" in msg
+
+
