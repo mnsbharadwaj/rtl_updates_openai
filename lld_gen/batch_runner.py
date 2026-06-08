@@ -34,6 +34,18 @@ from lld_gen.pr_stage import stage_pr
 
 logger = logging.getLogger(__name__)
 
+
+def _raw_diff(old_path: Path, new_path: Path) -> str:
+    """Return unified diff text between two files (same as git diff --no-index)."""
+    import difflib
+    old_lines = old_path.read_text(encoding="utf-8-sig", errors="replace").splitlines(keepends=True)
+    new_lines = new_path.read_text(encoding="utf-8-sig", errors="replace").splitlines(keepends=True)
+    return "".join(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{old_path.name}",
+        tofile=f"b/{new_path.name}",
+    ))
+
 # Separator widths
 _W  = 70   # wide bar
 _W2 = 50   # medium bar
@@ -349,10 +361,48 @@ class BatchRunner:
             _step_done(f"{len(auto_crs)} change(s) ready to patch")
 
             # ─────────────────────────────────────────────────────────────────
-            # STEP 2 — Build LLM client
+            # STEP 2 — LLM Change Summary  (raw diff → plain English)
             # ─────────────────────────────────────────────────────────────────
-            _step("2", "4", "Initialise LLM client")
-            llm = _make_llm(self.cfg, overrides, no_llm)
+            _step("2", "5", "LLM Change Summary")
+            _llm_early = _make_llm(self.cfg, overrides, no_llm)
+
+            if _llm_early.available:
+                _info("Sending raw diff to LLM for plain-English summary ...")
+                raw_diff    = _raw_diff(job.old_sfr, job.new_sfr)
+                cls_text    = summarize_changes(all_changes)
+                llm_summary = _llm_early.summarize_diff(
+                    ip=job.ip,
+                    diff_text=raw_diff,
+                    changes_summary=cls_text,
+                )
+                logger.info("  │")
+                if llm_summary:
+                    for line in llm_summary.splitlines():
+                        logger.info("  │   %s", line)
+                else:
+                    _info("(LLM returned empty — see structured list above)")
+                logger.info("  │")
+            else:
+                # Fallback: formatted table from ChangeRecords
+                _info("LLM unavailable — structured change table:")
+                logger.info("  │")
+                logger.info("  │   %-28s  %-16s  %-16s  %s",
+                            "Change Type", "Register", "Field", "Detail")
+                logger.info("  │   %s  %s  %s  %s",
+                            "─"*28, "─"*16, "─"*16, "─"*28)
+                for cr in all_changes:
+                    field_part = cr.field_name or ""
+                    detail     = ", ".join(cr.details) if cr.details else ""
+                    logger.info("  │   %-28s  %-16s  %-16s  %s",
+                                cr.change_type, cr.reg_name, field_part, detail)
+                logger.info("  │")
+            _step_done()
+
+            # ─────────────────────────────────────────────────────────────────
+            # STEP 3 — Build LLM client (reuse if already built)
+            # ─────────────────────────────────────────────────────────────────
+            _step("3", "5", "Initialise LLM client")
+            llm = _llm_early   # already created above
             _ok(f"LLM available={llm.available}  backend={llm.backend}")
             _step_done()
 
@@ -363,7 +413,7 @@ class BatchRunner:
             # ─────────────────────────────────────────────────────────────────
             # STEP 3 — Scan ALL LLD files
             # ─────────────────────────────────────────────────────────────────
-            _step("3", "4", f"Scan {self.cfg.lld_dir.name}/ for LLD files referencing changed registers")
+            _step("4", "5", f"Scan {self.cfg.lld_dir.name}/ for LLD files referencing changed registers")
             lld_hits = _lld_files_for_changes(auto_crs, job.ip, self.cfg.lld_dir)
 
             if not lld_hits:
@@ -379,7 +429,7 @@ class BatchRunner:
             # ─────────────────────────────────────────────────────────────────
             # STEP 4 — Patch each LLD file
             # ─────────────────────────────────────────────────────────────────
-            _step("4", "4", f"Patch {len(lld_hits)} LLD file(s)")
+            _step("5", "5", f"Patch {len(lld_hits)} LLD file(s)")
             all_manual: List[str] = [
                 f"{cr.change_type}: {cr.reg_name}" + (f".{cr.field_name}" if cr.field_name else "")
                 for cr in manual_crs

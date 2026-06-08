@@ -665,6 +665,48 @@ class LLMClient:
             self._to_cache(key, code)
         return code
 
+    # ── Public: SFR diff summary (plain-English from raw git diff) ───────────
+    def summarize_diff(
+        self,
+        ip:        str,
+        diff_text: str,
+        changes_summary: str = "",
+    ) -> str:
+        """
+        Send the raw unified diff (difflib / git diff output) to the LLM and
+        get a concise plain-English summary of what changed, why it matters
+        for the LLD driver, and which functions need updating.
+
+        Returns empty string if LLM is unavailable (caller prints raw change list).
+        """
+        if not self.available:
+            return ""
+
+        # Truncate diff to avoid blowing context window
+        diff_body = _truncate(diff_text, min(self.cfg.context_limit, 3000))
+
+        system = (
+            "You are a senior embedded firmware engineer reviewing SFR (Special Function Register) "
+            "header changes for a Samsung IP block. "
+            "Analyse the provided unified diff and write a SHORT, structured change summary. "
+            "Format your answer as bullet points. Each bullet must name: "
+            "the register, the field (if applicable), what changed (bit-width / access / offset / "
+            "description / added / deleted / renamed), and the firmware impact. "
+            "Be concise — max 3 lines per change. No markdown fences. No prose introduction."
+        )
+        user = (
+            f"IP: {ip}\n"
+            f"Classifier output:\n{changes_summary}\n\n"
+            f"Raw SFR diff:\n{diff_body}\n\n"
+            "Write the plain-English change summary now:"
+        )
+
+        try:
+            return self._call(system, user, max_tokens=800).strip()
+        except Exception as exc:
+            logger.warning("[LLM-SUMMARY] Failed: %s", exc)
+            return ""
+
     # ── Public: compile-error fix ─────────────────────────────────────────────
     def fix_compile_error(
         self,
