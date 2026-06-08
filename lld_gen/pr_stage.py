@@ -255,16 +255,18 @@ def build_pr_description(
     else:
         deprecated_section = ""
 
-    diff_stat  = _git_diff_stat(lld_file)
+    diff_stat  = _git_diff_stat(lld_file) if lld_file else "(no LLD file to diff)"
     gh_url     = _get_github_url(github_url)
     pr_section = _make_pr_section(gh_url, ip)
+    lld_name   = Path(lld_file).name if lld_file else "(none)"
+    test_name  = Path(test_file).name if test_file else "(none)"
 
     result = _PR_TEMPLATE.format(
         ip=ip.upper(),
         date=date,
         rows="\n".join(rows),
-        lld_file=Path(lld_file).name,
-        test_file=Path(test_file).name,
+        lld_file=lld_name,
+        test_file=test_name,
         added_fns="\n".join(added_fns or ["(none)"]),
         removed_fns="\n".join(removed_fns or ["(none)"]),
         deprecated_section=deprecated_section,
@@ -326,10 +328,10 @@ def stage_pr(
     Returns:
         Path to PR_DESCRIPTION.md
     """
-    lld_file  = Path(lld_file)
-    test_file = Path(test_file)
+    lld_file  = Path(lld_file) if lld_file else None
+    test_file = Path(test_file) if test_file else None
     sfr_new   = Path(sfr_new)
-    out_dir   = Path(out_dir) if out_dir else lld_file.parent
+    out_dir   = Path(out_dir) if out_dir else (lld_file.parent if lld_file else sfr_new.parent)
 
     gh_url = _get_github_url(github_url)
 
@@ -360,7 +362,11 @@ def stage_pr(
         logger.info("[PR] Create PR    : %s/compare/%s?expand=1", gh_url, branch)
 
     if not no_git:
-        files_to_stage = [lld_file, test_file, sfr_new, pr_path]
+        files_to_stage = [sfr_new, pr_path]
+        if lld_file:
+            files_to_stage.append(lld_file)
+        if test_file:
+            files_to_stage.append(test_file)
         ok = _git_add(*files_to_stage)
         if ok:
             logger.info("[PR] git add: %s", ', '.join(str(f.name) for f in files_to_stage))

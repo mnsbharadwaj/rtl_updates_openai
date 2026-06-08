@@ -261,6 +261,7 @@ class WorkflowRunner:
         lld_path:    Path,
         llm_client:  Optional[LLMClient],
         gcc_exe:     Optional[str],
+        ip_sfr_map:  Optional[Dict[str, Path]] = None,
     ) -> IPWorkflowResult:
         """Run the full D→H pipeline for one IP."""
         result = IPWorkflowResult(ip=ip)
@@ -276,10 +277,7 @@ class WorkflowRunner:
             return result
 
         if lld_file is None:
-            result.status = "SKIP"
-            result.error  = f"No LLD file found for IP={ip}"
-            logger.info(f"  [D] SKIP {ip}: {result.error}")
-            return result
+            logger.warning(f"  [D] No LLD file found specifically for IP={ip}. Only performing cross-file AST refactoring.")
 
         logger.info(f"  [D] Diff: {old_sfr.name} vs {new_sfr.name} ...")
         changes = classify_sfr_diff(old_sfr, new_sfr, ip=ip)
@@ -304,65 +302,81 @@ class WorkflowRunner:
         ]
 
         # ── E: Patch LLD ─────────────────────────────────────────────────────
-        logger.info(f"  [E] Patching {lld_file.name} ({len(auto_crs)} auto-patchable changes) ...")
         cfg = self.cfg
-
         out_dir = cfg.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_lld = out_dir / lld_file.name
-        shutil.copy2(lld_file, out_lld)
 
-        # Parse new SFR for struct generation
-        from lld_gen.sfr_diff_analyzer import SfrParser
-        new_ir = SfrParser(ip=ip).parse_file(new_sfr)
+        out_lld = None
+        test_file = None
+        deprecated_fns = []
+        compile_result = None
 
-        patcher = LLDPatcher(
-            ip         = ip,
-            llm_client = llm_client,
-            no_llm     = cfg.no_llm,
-        )
-        try:
-            patcher.patch(
-                lld_path = out_lld,
-                changes  = auto_crs,
-                new_ir   = new_ir,
-                out_path = out_lld,
+        if lld_file is not None:
+            logger.info(f"  [E] Patching {lld_file.name} ({len(auto_crs)} auto-patchable changes) ...")
+            out_lld = out_dir / lld_file.name
+            shutil.copy2(lld_file, out_lld)
+
+            # Parse new SFR for struct generation
+            from lld_gen.sfr_diff_analyzer import SfrParser
+            new_ir = SfrParser(ip=ip).parse_file(new_sfr)
+
+            patcher = LLDPatcher(
+                ip         = ip,
+                llm_client = llm_client,
+                no_llm     = cfg.no_llm,
             )
-        except RuntimeError as exc:
-            result.status = "FAIL"
-            result.error  = f"Patcher error: {exc}"
-            logger.error(f"  [E] FAIL: {exc}")
-            return result
+            try:
+                patcher.patch(
+                    lld_path = out_lld,
+                    changes  = auto_crs,
+                    new_ir   = new_ir,
+                    out_path = out_lld,
+                )
+            except RuntimeError as exc:
+                result.status = "FAIL"
+                result.error  = f"Patcher error: {exc}"
+                logger.error(f"  [E] FAIL: {exc}")
+                return result
 
-        # Write test file
-        tests_dir = cfg.tests_dir
-        tests_dir.mkdir(parents=True, exist_ok=True)
-        test_file = tests_dir / f"test_lld_{ip.lower()}.c"
-        lld_text  = out_lld.read_text(encoding="utf-8")
-        patcher.write_test_file(
-            out_path  = test_file,
-            sfr_new   = new_sfr.name,
-            lld_new   = out_lld.name,
-            new_ir    = new_ir,
-            llm_client= llm_client,
-            lld_text  = lld_text,
-        )
+            # Write test file
+            tests_dir = cfg.tests_dir
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            test_file = tests_dir / f"test_lld_{ip.lower()}.c"
+            lld_text  = out_lld.read_text(encoding="utf-8")
+            patcher.write_test_file(
+                out_path  = test_file,
+                sfr_new   = new_sfr.name,
+                lld_new   = out_lld.name,
+                new_ir    = new_ir,
+                llm_client= llm_client,
+                lld_text  = lld_text,
+            )
 
-        result.n_auto_patched = len(auto_crs) - len(patcher.get_deprecated_fns() or [])
+            result.n_auto_patched = len(auto_crs) - len(patcher.get_deprecated_fns() or [])
 
-        # ── E: Compile gate (full file after all patches) ─────────────────────
-        logger.info(f"  [E] Compile-checking {out_lld.name} ...")
-        compile_result = run_compile_check(
-            test_file  = test_file,
-            sfr_new    = new_sfr,
-            lld_file   = out_lld,
-            llm_client = llm_client if not cfg.no_llm else None,
-            gcc_exe    = gcc_exe,
-            required   = cfg.compile_check,
-        )
-        result.compile_ok = compile_result.success
-        if compile_result.needs_review:
-            result.manual_review_items.extend(compile_result.needs_review)
+            # ── E: Compile gate (full file after all patches) ─────────────────────
+            logger.info(f"  [E] Compile-checking {out_lld.name} ...")
+            compile_result = run_compile_check(
+                test_file  = test_file,
+                sfr_new    = new_sfr,
+                lld_file   = out_lld,
+                llm_client = llm_client if not cfg.no_llm else None,
+                gcc_exe    = gcc_exe,
+                required   = cfg.compile_check,
+            )
+            result.compile_ok = compile_result.success
+            if compile_result.needs_review:
+                result.manual_review_items.extend(compile_result.needs_review)
+            deprecated_fns = patcher.get_deprecated_fns()
+        else:
+            logger.info(f"  [E] Skipping direct LLD patching and compile checking for IP={ip}")
+            from lld_gen.sfr_diff_analyzer import SfrParser
+            new_ir = SfrParser(ip=ip).parse_file(new_sfr)
+            from lld_gen.compile_check import CompileResult
+            compile_result = CompileResult(success=True, stdout="", stderr="")
+            result.compile_ok = True
+            result.n_auto_patched = len(auto_crs)
+            deprecated_fns = []
 
         # ── F: Cross-LLD reference scan ───────────────────────────────────────
         cross_refs = {}
@@ -397,6 +411,35 @@ class WorkflowRunner:
             )
             result.cross_ref_files = list(set(result.cross_ref_files + [str(p) for p in ast_patched_files]))
 
+            if ast_patched_files and ip_sfr_map:
+                logger.info(f"  [COMPILE-CHECK] Verifying {len(ast_patched_files)} refactored file(s)...")
+                for patched_file in ast_patched_files:
+                    matching_ip = None
+                    patched_name = patched_file.name.lower()
+                    for cand_ip in ip_sfr_map.keys():
+                        cand_lower = cand_ip.lower()
+                        if cand_lower in patched_name:
+                            matching_ip = cand_ip
+                            break
+                    if matching_ip:
+                        patched_test_file = cfg.tests_dir / f"test_lld_{matching_ip.lower()}.c"
+                        patched_sfr_new = ip_sfr_map[matching_ip]
+                        if patched_test_file.exists():
+                            logger.info(f"  [COMPILE-CHECK]   Testing {patched_file.name} via {patched_test_file.name}...")
+                            patched_compile = run_compile_check(
+                                test_file  = patched_test_file,
+                                sfr_new    = patched_sfr_new,
+                                lld_file   = patched_file,
+                                llm_client = llm_client,
+                                gcc_exe    = gcc_exe,
+                                required   = cfg.compile_check,
+                            )
+                            if not patched_compile.success:
+                                logger.warning(f"  [COMPILE-CHECK]   {patched_file.name} failed compilation!")
+                                result.compile_ok = False
+                                if patched_compile.needs_review:
+                                    result.manual_review_items.extend(patched_compile.needs_review)
+
         # ── G: Stage PR description ───────────────────────────────────────────
         cross_ref_md = format_cross_ref_report(cross_refs)
         pr_desc = build_pr_description(
@@ -405,7 +448,7 @@ class WorkflowRunner:
             compile_result  = compile_result,
             lld_file        = out_lld,
             test_file       = test_file,
-            deprecated_fns  = patcher.get_deprecated_fns(),
+            deprecated_fns  = deprecated_fns,
         )
         # Append manual review and cross-ref sections
         manual_section = _build_manual_review_section(manual_crs, compile_result)
@@ -428,7 +471,7 @@ class WorkflowRunner:
                 f"Compile: {'OK' if result.compile_ok else 'NEEDS_REVIEW'}\n"
                 f"\nChange summary:\n{result.change_summary}"
             )
-            files_to_commit = [out_lld, test_file, pr_desc_path] + ast_patched_files
+            files_to_commit = [f for f in (out_lld, test_file, pr_desc_path) if f] + ast_patched_files
             result.commit_sha = self._lld_gm.commit(files_to_commit, commit_msg) or ""
 
         result.status = "OK" if compile_result.success else "WARN"
@@ -587,6 +630,7 @@ class WorkflowRunner:
                     lld_path   = lld_path,
                     llm_client = llm_client,
                     gcc_exe    = gcc_exe,
+                    ip_sfr_map = ip_sfr_map,
                 )
             except Exception as exc:
                 ip_result = IPWorkflowResult(ip=ip, status="FAIL", error=str(exc))

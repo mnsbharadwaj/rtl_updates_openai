@@ -275,3 +275,44 @@ int main(void) {
         assert "All generated unit test assertions passed" in msg
 
 
+def test_lld_less_sfr_ast_refactoring():
+    """Verify that an LLD-less SFR register change is refactored in other LLD files referencing it."""
+    pmu_lld_code = """
+#include "sfr_clock.h"
+#include "sfr_pmu.h"
+
+static inline void sync_pmu_with_clock(struct lld_pmu *lld, struct lld_clock *clk) {
+    // Reference to CLOCK_CON under clk -> should rename to CLK_CTRL
+    clk->pSFR->stCLOCK_CON.stNative.CLK_EN = 1;
+}
+"""
+    clock_change = ChangeRecord(
+        change_type = ChangeType.REG_RENAMED,
+        reg_name    = "CLOCK_CON",
+        field_name  = None,
+        old_reg     = RegisterIR("CLOCK_CON", 0, {}),
+        new_reg     = RegisterIR("CLK_CTRL", 0, {}),
+        needs_llm   = False,
+        details     = []
+    )
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = Path(tmpdir) / "lld_pmu.h"
+        file_path.write_text(pmu_lld_code, encoding="utf-8")
+        
+        applied = refactor_file(
+            file_path = file_path,
+            changes   = [clock_change],
+            custom_typedefs = {"SFR_CLOCK_CLOCK_CON", "SFR_CLOCK_CLK_CTRL"},
+            ip        = "CLOCK"
+        )
+        
+        assert len(applied) == 1
+        assert applied[0] == (7, "stCLOCK_CON", "stCLK_CTRL")
+        
+        updated_text = file_path.read_text(encoding="utf-8")
+        assert "stCLK_CTRL" in updated_text
+        assert "stCLOCK_CON" not in updated_text
+
+
+

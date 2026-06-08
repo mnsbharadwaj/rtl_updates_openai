@@ -155,6 +155,7 @@ class LLMConfig:
     timeout:       float = 120.0
     max_retries:   int   = 3
     context_limit: int   = 4096            # chars; truncate prompt body if exceeded
+    location:      str   = "local"          # local|cloud
 
     # Default URLs per backend (can all be overridden via url:)
     _DEFAULT_URLS: Dict[str, str] = field(default_factory=lambda: {
@@ -224,6 +225,18 @@ def load_llm_config(data: dict) -> LLMConfig:
 
     llm_section = data.get("llm", {}) or {}
 
+    # Resolve location
+    location = "local"
+    for k in ("location", "cloud_or_local", "mode"):
+        if k in llm_section:
+            location = str(llm_section[k]).strip().lower()
+            break
+    else:
+        for k in ("llm_location", "cloud_or_local", "llm_mode"):
+            if k in data:
+                location = str(data[k]).strip().lower()
+                break
+
     cfg = LLMConfig(
         backend       = llm_section.get("backend", ""),
         model         = llm_section.get("model", ""),
@@ -235,6 +248,7 @@ def load_llm_config(data: dict) -> LLMConfig:
         timeout       = float(llm_section.get("timeout", 120.0)),
         max_retries   = int(llm_section.get("max_retries", 3)),
         context_limit = int(llm_section.get("context_limit", 4096)),
+        location      = location,
     )
 
     # ── Legacy flat field support ────────────────────────────────────────────
@@ -333,6 +347,10 @@ class LLMClient:
         b = self.cfg.backend
         if b == "none" or not b:
             return None
+        if getattr(self.cfg, "location", "local") == "cloud":
+            if not self._requests:
+                return None
+            return self._call_cloud_ollama
         if b == "ollama":
             return self._verify_ollama()
         if b == "openai":
@@ -405,6 +423,26 @@ class LLMClient:
                                    attempt + 1, self.cfg.max_retries, wait, exc)
                     time.sleep(wait)
         raise RuntimeError(f"LLM call failed after {self.cfg.max_retries} retries: {last_exc}")
+
+    # ── Backend: Cloud Ollama ─────────────────────────────────────────────────
+    def _call_cloud_ollama(self, system: str, user: str, max_tokens: int) -> str:
+        url = "http://107.99.41.85/ollama/srv1/api/generate"
+        prompt = (
+            f"System Instruction:\n{system}\n\n"
+            f"User Context and Request:\n{user}\n\n"
+            "Please generate the C code containing only the static inline function(s) or the fixed code. "
+            "Return only the C code, without any markdown code fences, explanation, or prose."
+        )
+        payload = {
+            "model": "gpt-oss",
+            "prompt": prompt,
+            "stream": False,
+        }
+        resp = self._requests.post(
+            url, json=payload, timeout=self.cfg.timeout
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "")
 
     # ── Backend: Ollama ───────────────────────────────────────────────────────
     def _call_ollama(self, system: str, user: str, max_tokens: int) -> str:

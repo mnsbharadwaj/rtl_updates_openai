@@ -171,22 +171,58 @@ def remove_comments_keep_spacing(text: str) -> str:
     return "".join(out)
 
 
+def get_function_renames(ip: str, changes: List[ChangeRecord]) -> Dict[str, str]:
+    """
+    Build a mapping of compiled function name regex patterns to their new names
+    based on the ChangeRecords (register renames or field renames).
+    """
+    renames: Dict[str, str] = {}
+    if not ip or not changes:
+        return renames
+    ip_lo = ip.lower()
+    for cr in changes:
+        if cr.change_type == ChangeType.REG_RENAMED and cr.old_reg and cr.new_reg:
+            # Matches any verb/field after the register: lld_ip_oldreg_field_verb -> lld_ip_newreg_field_verb
+            pattern = rf"\blld_{ip_lo}_{cr.old_reg.name.lower()}_([a-zA-Z0-9_]+)\b"
+            replacement = f"lld_{ip_lo}_{cr.new_reg.name.lower()}_\\1"
+            renames[pattern] = replacement
+        elif cr.change_type == ChangeType.FIELD_RENAMED and cr.old_field and cr.new_field:
+            reg_lo = cr.reg_name.lower()
+            old_f = cr.old_field.name.lower()
+            new_f = cr.new_field.name.lower()
+            for verb in ("get", "set", "clear", "set1", "trigger"):
+                old_fn = f"lld_{ip_lo}_{reg_lo}_{old_f}_{verb}"
+                new_fn = f"lld_{ip_lo}_{reg_lo}_{new_f}_{verb}"
+                renames[rf"\b{old_fn}\b"] = new_fn
+    return renames
+
+
 def refactor_file(
     file_path: Path,
     changes: List[ChangeRecord],
-    custom_typedefs: Set[str]
+    custom_typedefs: Set[str],
+    ip: str = ""
 ) -> List[Tuple[int, str, str]]:
     """
     Parses a C source/header file, finds all register/field accesses that match the changes,
-    applies updates in-place, and saves the file.
+    applies updates in-place, and saves the file. Also updates matching function call names.
 
     Returns a list of applied patches: [(line_number, old_text, new_text)]
     """
     try:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
+        text = file_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as e:
         logger.error("[AST] Failed to read %s: %s", file_path.name, e)
         return []
+
+    # 1. Apply function name renames first via word-boundary regex
+    fn_renames = get_function_renames(ip, changes)
+    any_fn_renamed = False
+    for pattern, repl in fn_renames.items():
+        new_text, count = re.subn(pattern, repl, text)
+        if count > 0:
+            text = new_text
+            any_fn_renamed = True
 
     # Comment out preprocessor lines to prevent parse errors while preserving line numbers
     cleaned_lines = []
@@ -206,6 +242,14 @@ def refactor_file(
     try:
         ast = parser.parse(code_for_parser, filename=str(file_path))
     except Exception as e:
+        # If we had function renames, save the text first before skipping
+        if any_fn_renamed:
+            try:
+                file_path.write_text(text, encoding="utf-8")
+                logger.info("[AST] Renamed function names only in %s (parsed AST skipped)", file_path.name)
+                return [(1, "function_name_renamed", "yes")]
+            except OSError as write_err:
+                logger.error("[AST] Failed to write %s: %s", file_path.name, write_err)
         logger.warning("[AST] Skipping %s: parse error (%s)", file_path.name, str(e).strip())
         return []
 
@@ -213,7 +257,7 @@ def refactor_file(
     visitor = StructRefVisitor(changes)
     visitor.visit(ast)
 
-    if not visitor.replacements:
+    if not visitor.replacements and not any_fn_renamed:
         return []
 
     # Apply replacements line-by-line (sorted in reverse order of line and column)
@@ -242,6 +286,9 @@ def refactor_file(
             applied.append((line_no, old_text, new_text))
             logger.debug("[AST] Patched %s:%d: %s -> %s", file_path.name, line_no, old_text, new_text)
 
+    if any_fn_renamed and not applied:
+        applied.append((1, "function_name_renamed", "yes"))
+
     if applied:
         try:
             file_path.write_text("\n".join(lines), encoding="utf-8")
@@ -258,8 +305,8 @@ def refactor_cross_references(
     ip: str,
     new_ir: object,
     auto_crs: List[ChangeRecord],
-    out_lld: Path,
-    test_file: Path
+    out_lld: Optional[Path] = None,
+    test_file: Optional[Path] = None
 ) -> List[Path]:
     """
     Scans the output directory and LLD directory for other C source/header files,
@@ -286,7 +333,7 @@ def refactor_cross_references(
         for ext in ("*.c", "*.h", "*.cpp"):
             for f in d.rglob(ext):
                 resolved_f = f.resolve()
-                if resolved_f == out_lld.resolve() or resolved_f == test_file.resolve():
+                if (out_lld and resolved_f == out_lld.resolve()) or (test_file and resolved_f == test_file.resolve()):
                     continue
                 if resolved_f not in files_to_scan:
                     files_to_scan.append(resolved_f)
@@ -304,7 +351,7 @@ def refactor_cross_references(
     # Also extract any SFR_ or pSFR_ names found in the files' contents
     for file_path in files_to_scan:
         try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
+            text = file_path.read_text(encoding="utf-8-sig", errors="replace")
             for m in re.finditer(r'\b(SFR_[A-Za-z0-9_]+|pSFR_[A-Za-z0-9_]+)\b', text):
                 custom_typedefs.add(m.group(1))
         except Exception:
@@ -313,7 +360,7 @@ def refactor_cross_references(
     # 4. Run refactoring on each file
     patched_files = []
     for file_path in files_to_scan:
-        applied = refactor_file(file_path, auto_crs, custom_typedefs)
+        applied = refactor_file(file_path, auto_crs, custom_typedefs, ip)
         if applied:
             patched_files.append(file_path)
             

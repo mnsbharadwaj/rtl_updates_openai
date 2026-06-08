@@ -283,12 +283,7 @@ class BatchRunner:
                 logger.warning(f"  [MANUAL-REVIEW] {len(manual_items)} items skipped: {', '.join(manual_items[:3])}"
                       + ("..." if len(manual_items) > 3 else ""))
 
-            # Step 2: Copy LLD to output_dir, patch in-place
-            logger.info(f"  [2/5] Patch {job.ip} LLD ({len(auto_crs)} auto-patchable changes)...")
-            shutil.copy2(job.lld, job.out_lld)
-
-            parser       = SfrParser(ip=job.ip)
-            new_ir       = parser.parse_file(job.new_sfr)
+            # Initialize LLM client for this IP
             ollama_model = str(overrides.get("ollama_model", self.cfg.ollama_model) or "")
             from lld_gen.llm_client import load_llm_config
             llm_cfg = load_llm_config({
@@ -297,47 +292,68 @@ class BatchRunner:
                 "ollama_model": ollama_model,
             })
             llm = LLMClient(llm_cfg)
-            patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
 
-            patcher.patch(
-                lld_path = job.out_lld,
-                changes  = auto_crs,       # only auto-patchable changes
-                new_ir   = new_ir,
-                out_path = job.out_lld,
-            )
-            logger.debug(f"  Patched LLD written -> {job.out_lld}")
+            # Step 2 & 3: Patch LLD and Compile Check (conditional on job.lld)
+            if job.lld:
+                logger.info(f"  [2/5] Patch {job.ip} LLD ({len(auto_crs)} auto-patchable changes)...")
+                shutil.copy2(job.lld, job.out_lld)
 
-            # Write test file
-            test_file    = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
-            lld_text     = job.out_lld.read_text(encoding="utf-8") if job.out_lld.exists() else ""
-            llm_test_gen = bool(self.cfg.llm_test_gen)
-            patcher.write_test_file(
-                out_path   = test_file,
-                sfr_new    = job.new_sfr.name,
-                lld_new    = job.out_lld.name,
-                new_ir     = new_ir,
-                llm_client = llm if llm_test_gen else None,
-                lld_text   = lld_text,
-            )
-            mode_tag = "[LLM+Template fallback]" if llm_test_gen else "[Template]"
-            logger.debug(f"  Test file written  -> {test_file}  {mode_tag}")
+                parser       = SfrParser(ip=job.ip)
+                new_ir       = parser.parse_file(job.new_sfr)
+                patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
 
-            # Step 3: Compile check
-            logger.info(f"  [3/5] Compile-check {job.ip}...")
-            compile_result = run_compile_check(
-                test_file  = test_file,
-                sfr_new    = job.new_sfr,
-                lld_file   = job.out_lld,
-                llm_client = llm,
-                gcc_exe    = gcc_exe,
-                required   = self.cfg.compile_check,
-            )
-            result.compile_ok = compile_result.success
-            if compile_result.success:
-                logger.info(f"  [OK] Compile passed for {job.ip}")
+                patcher.patch(
+                    lld_path = job.out_lld,
+                    changes  = auto_crs,       # only auto-patchable changes
+                    new_ir   = new_ir,
+                    out_path = job.out_lld,
+                )
+                logger.debug(f"  Patched LLD written -> {job.out_lld}")
+
+                # Write test file
+                test_file    = job.tests_dir / f"test_lld_{job.ip.lower()}.c"
+                lld_text     = job.out_lld.read_text(encoding="utf-8") if job.out_lld.exists() else ""
+                llm_test_gen = bool(self.cfg.llm_test_gen)
+                patcher.write_test_file(
+                    out_path   = test_file,
+                    sfr_new    = job.new_sfr.name,
+                    lld_new    = job.out_lld.name,
+                    new_ir     = new_ir,
+                    llm_client = llm if llm_test_gen else None,
+                    lld_text   = lld_text,
+                )
+                mode_tag = "[LLM+Template fallback]" if llm_test_gen else "[Template]"
+                logger.debug(f"  Test file written  -> {test_file}  {mode_tag}")
+
+                # Step 3: Compile check
+                logger.info(f"  [3/5] Compile-check {job.ip}...")
+                compile_result = run_compile_check(
+                    test_file  = test_file,
+                    sfr_new    = job.new_sfr,
+                    lld_file   = job.out_lld,
+                    llm_client = llm,
+                    gcc_exe    = gcc_exe,
+                    required   = self.cfg.compile_check,
+                )
+                result.compile_ok = compile_result.success
+                if compile_result.success:
+                    logger.info(f"  [OK] Compile passed for {job.ip}")
+                else:
+                    logger.warning(f"  [WARN] Compile failed for {job.ip} "
+                          f"(needs_review={compile_result.needs_review})")
+                deprecated_fns = patcher.get_deprecated_fns()
             else:
-                logger.warning(f"  [WARN] Compile failed for {job.ip} "
-                      f"(needs_review={compile_result.needs_review})")
+                logger.info(f"  [SKIP] No LLD file specifically for {job.ip} -- skipping Step 2 (Patch) and Step 3 (Compile)")
+                parser = SfrParser(ip=job.ip)
+                new_ir = parser.parse_file(job.new_sfr)
+                test_file = None
+                from lld_gen.compile_check import CompileResult
+                compile_result = CompileResult(success=True, stdout="", stderr="")
+                deprecated_fns = []
+
+            all_manual = list(manual_items)
+            if compile_result and compile_result.needs_review:
+                all_manual.extend(compile_result.needs_review)
 
             # Step 4: Cross-LLD reference scan and AST refactoring
             cross_ref_md = ""
@@ -374,12 +390,35 @@ class BatchRunner:
                     out_lld   = job.out_lld,
                     test_file = test_file,
                 )
+                if ast_patched_files:
+                    logger.info(f"  [COMPILE-CHECK] Verifying {len(ast_patched_files)} refactored file(s)...")
+                    for patched_file in ast_patched_files:
+                        matching_job = None
+                        for j in jobs:
+                            if j.out_lld and j.out_lld.resolve() == patched_file.resolve():
+                                matching_job = j
+                                break
+                        if matching_job:
+                            patched_test_file = matching_job.tests_dir / f"test_lld_{matching_job.ip.lower()}.c"
+                            if patched_test_file.exists():
+                                logger.info(f"  [COMPILE-CHECK]   Testing {patched_file.name} via {patched_test_file.name}...")
+                                patched_compile = run_compile_check(
+                                    test_file  = patched_test_file,
+                                    sfr_new    = matching_job.new_sfr,
+                                    lld_file   = patched_file,
+                                    llm_client = llm,
+                                    gcc_exe    = gcc_exe,
+                                    required   = self.cfg.compile_check,
+                                )
+                                if not patched_compile.success:
+                                    logger.warning(f"  [COMPILE-CHECK]   {patched_file.name} failed compilation!")
+                                    if patched_compile.needs_review:
+                                        all_manual.extend(patched_compile.needs_review)
             else:
                 logger.info("  [4/5] Cross-LLD scan skipped")
 
             # Step 5: Stage PR
             logger.info(f"  [5/5] Stage PR for {job.ip}...")
-            all_manual = manual_items + (compile_result.needs_review or [])
             stage_pr(
                 ip                  = job.ip,
                 changes             = all_changes,
@@ -387,7 +426,7 @@ class BatchRunner:
                 lld_file            = job.out_lld,
                 test_file           = test_file,
                 sfr_new             = job.new_sfr,
-                deprecated_fns      = patcher.get_deprecated_fns(),
+                deprecated_fns      = deprecated_fns,
                 no_git              = no_git,
                 github_url          = self.cfg.github_url,
                 manual_review_items = all_manual if all_manual else None,
@@ -397,8 +436,9 @@ class BatchRunner:
             # Atomic git commit: one commit per SFR file changed
             if not no_git and atomic_commits:
                 import subprocess as _sp
-                commit_files = [str(job.out_lld), str(test_file)] + [str(p) for p in ast_patched_files]
-                pr_desc_path = job.out_lld.parent / "PR_DESCRIPTION.md"
+                commit_files = [str(f) for f in (job.out_lld, test_file) if f] + [str(p) for p in ast_patched_files]
+                pr_desc_dir = job.out_lld.parent if job.out_lld else job.new_sfr.parent
+                pr_desc_path = pr_desc_dir / "PR_DESCRIPTION.md"
                 if pr_desc_path.exists():
                     commit_files.append(str(pr_desc_path))
                 _sp.run(["git", "add"] + commit_files, capture_output=True)

@@ -369,7 +369,7 @@ class UnionSfrParser:
     def parse_file(self, path: str | Path) -> SfrIR:
         if not self.ip:
             self.ip = _ip_from_filename(path)
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
         return self.parse_text(text, source=str(path))
 
     def parse_text(self, text: str, source: str = "<string>") -> SfrIR:

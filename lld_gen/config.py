@@ -40,9 +40,9 @@ class IPJob:
     ip:        str
     old_sfr:   Path
     new_sfr:   Path
-    lld:       Path
-    out_lld:   Path          # where to write the patched file
-    tests_dir: Path
+    lld:       Optional[Path] = None
+    out_lld:   Optional[Path] = None          # where to write the patched file
+    tests_dir: Optional[Path] = None
 
     def __str__(self) -> str:
         return (
@@ -299,43 +299,58 @@ def load_config(config_path: str | Path) -> PatcherConfig:
 
 
 def _parse_yaml(text: str) -> dict:
-    """Parse YAML using PyYAML if available, else minimal key:value parser."""
+    """Parse YAML using PyYAML if available, else minimal key:value parser supporting 1-level indentation."""
     if _HAS_YAML:
         return _yaml.safe_load(text) or {}
-    # Minimal fallback: handle simple key: value and key: null lines
-    # Sufficient for lld_patcher.yaml which has no nested structures
-    # (ip_overrides block is ignored without PyYAML)
     data: dict = {}
+    current_parent: Optional[str] = None
     for ln in text.splitlines():
-        stripped = ln.strip()
+        stripped = ln.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
+        indent = len(ln) - len(stripped)
         if ":" not in stripped:
             continue
-        key, _, val = stripped.partition(":")
+        # Strip inline comment
+        comment_idx = stripped.find(" #")
+        if comment_idx != -1:
+            line_content = stripped[:comment_idx].strip()
+        else:
+            line_content = stripped.strip()
+        key, _, val = line_content.partition(":")
         key = key.strip()
         val = val.strip()
-        # Strip inline comment
-        if " #" in val:
-            val = val[:val.index(" #")].strip()
-        # Type coercion
+        
+        parsed_val: Any = None
         if val.lower() in ("null", "~", ""):
-            data[key] = None
+            parsed_val = None
         elif val.lower() == "true":
-            data[key] = True
+            parsed_val = True
         elif val.lower() == "false":
-            data[key] = False
+            parsed_val = False
         else:
-            # Try int/float, else keep as string (strip quotes)
             val = val.strip("\"'")
             try:
-                data[key] = int(val)
+                parsed_val = int(val)
             except ValueError:
                 try:
-                    data[key] = float(val)
+                    parsed_val = float(val)
                 except ValueError:
-                    data[key] = val
+                    parsed_val = val
+        if indent == 0:
+            if val == "":
+                current_parent = key
+                data[key] = {}
+            else:
+                current_parent = None
+                data[key] = parsed_val
+        else:
+            if current_parent is not None:
+                data[current_parent][key] = parsed_val
+            else:
+                data[key] = parsed_val
     return data
+
 
 
 # ---------------------------------------------------------------------------
@@ -442,16 +457,15 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
             ip = _ip_from_filename(old_path)
             new_path = new_files[stem]
             lld_path = _find_lld(ip, lld_files, cfg.lld_dir)
-            if lld_path:
-                out_lld  = _out_path(cfg.output_dir, lld_path)
-                tst_dir  = _ensure_dir(cfg.tests_dir)
-                jobs.append(IPJob(
-                    ip=ip, old_sfr=old_path, new_sfr=new_path,
-                    lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
-                ))
-                matched_old.add(stem)
-            else:
-                logger.warning("No LLD file found for IP=%s in %s", ip, cfg.lld_dir)
+            out_lld  = _out_path(cfg.output_dir, lld_path) if lld_path else None
+            tst_dir  = _ensure_dir(cfg.tests_dir) if cfg.tests_dir else None
+            if not lld_path:
+                logger.warning("No LLD file found for IP=%s in %s. Only performing cross-file AST refactoring.", ip, cfg.lld_dir)
+            jobs.append(IPJob(
+                ip=ip, old_sfr=old_path, new_sfr=new_path,
+                lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
+            ))
+            matched_old.add(stem)
 
     # ── Rule 2: _old/_new suffix pairing ────────────────────────────────────
     for stem, old_path in old_files.items():
@@ -474,16 +488,15 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
                     ip = _ip_from_filename(old_path).replace(old_suf.upper().lstrip("_"), "").rstrip("_") or _ip_from_filename(old_path)
                     new_path = new_files[new_stem]
                     lld_path = _find_lld(ip, lld_files, cfg.lld_dir)
-                    if lld_path:
-                        out_lld = _out_path(cfg.output_dir, lld_path)
-                        tst_dir = _ensure_dir(cfg.tests_dir)
-                        jobs.append(IPJob(
-                            ip=ip, old_sfr=old_path, new_sfr=new_path,
-                            lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
-                        ))
-                        matched_old.add(stem)
-                    else:
-                        logger.warning("No LLD file found for IP=%s in %s", ip, cfg.lld_dir)
+                    out_lld = _out_path(cfg.output_dir, lld_path) if lld_path else None
+                    tst_dir = _ensure_dir(cfg.tests_dir) if cfg.tests_dir else None
+                    if not lld_path:
+                        logger.warning("No LLD file found for IP=%s in %s. Only performing cross-file AST refactoring.", ip, cfg.lld_dir)
+                    jobs.append(IPJob(
+                        ip=ip, old_sfr=old_path, new_sfr=new_path,
+                        lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
+                    ))
+                    matched_old.add(stem)
                 break
 
     # ── Filter to ip_list if specified ─────────────────────────────────────
