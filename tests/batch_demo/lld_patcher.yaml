@@ -1,13 +1,26 @@
-# lld_patcher.yaml -- Demo batch config
+# lld_patcher.yaml -- Batch demo config
 #
-# Usage: python -m lld_gen.main_sfr run-config --config tests/batch_demo/lld_patcher.yaml
+# Usage:
+#   cd tests/batch_demo
+#   python -m lld_gen.main_sfr run-config --config lld_patcher.yaml
 
-sfr_old_dir: "./old_sfr"          # OLD SFR headers
-sfr_new_dir: "./new_sfr"          # NEW/UPDATED SFR headers
-lld_dir:     "./lld"              # Original LLD headers (read-only, never modified)
-output_dir:  "./lld_patched"      # Patched LLD files written HERE
-tests_dir:   "./tests_generated"  # Generated unit test .c files written HERE
+sfr_old_dir: "./old_sfr"          # OLD SFR headers  (*.h)
+sfr_new_dir: "./new_sfr"          # NEW SFR headers  (*.h, same filenames)
+lld_dir:     "./lld"              # LLD headers to scan and patch
+output_dir:  "./lld_patched"      # Patched copies written here
+tests_dir:   "./tests_generated"  # Generated unit-test .c files
 
-no_llm:   true    # no LLM for demo
-no_git:   true    # skip git add
-gcc:      null
+# -----------------------------------------------------------------------
+# LLM -- cloud endpoint is used by DEFAULT
+#
+#   no_llm: false  (default) -> LLM ON  -> cloud endpoint auto-selected
+#   no_llm: true             -> LLM OFF -> template-only, no HTTP calls
+# -----------------------------------------------------------------------
+no_llm: false
+
+# -----------------------------------------------------------------------
+# Git / compile -- disable for demo
+# -----------------------------------------------------------------------
+no_git:        true
+compile_check: false
+gcc:           null

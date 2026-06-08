@@ -85,6 +85,8 @@ class PatcherConfig:
     # v3.1 — gcc gate + LLM prompt
     compile_check:     bool = True   # True = gcc REQUIRED (stop if not found)
     force_no_llm:      bool = False  # True = skip LLM prompt, use template mode silently
+    # v3.2 — flexible LLD mapping (no 1-to-1 naming required)
+    lld_all_files:     bool = False  # True = apply every SFR change to ALL .h files in lld_dir
 
 
 @dataclass
@@ -295,6 +297,7 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         ip_list      = list(data.get("ip_list") or []),
         compile_check = bool(data.get("compile_check", True)),
         force_no_llm  = bool(data.get("force_no_llm",  False)),
+        lld_all_files = bool(data.get("lld_all_files", False)),
     )
 
 
@@ -429,10 +432,14 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
     """
     Scan old/new SFR directories and match files into IPJob list.
 
-    Matching rules (all case-insensitive):
-      1. Same filename in old + new dirs -> IP from filename
-      2. *_old.h in old_dir + *_new.h in new_dir -> strip suffix -> IP
-      3. LLD file searched as lld_{ip}.h, {ip}_lld.h, {ip}.h in lld_dir
+    Matching rules (all case-insensitive, in priority order):
+      1. ip_overrides[IP].lld_file  -- explicit per-IP LLD file mapping (wins over everything)
+      2. lld_all_files: true        -- patch ALL .h files in lld_dir for every SFR pair found
+      3. Same filename in old + new dirs -> IP from filename -> lld_{ip}.h searched
+      4. *_old.h in old_dir + *_new.h in new_dir -> strip suffix -> IP -> lld searched
+
+    When there is no 1-to-1 naming match and no explicit mapping, each SFR pair is
+    still added to the job list with lld=None so that cross-LLD AST refactoring can run.
     """
     from lld_gen.sfr_diff_analyzer import _ip_from_filename
 
@@ -447,35 +454,71 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
     old_files: Dict[str, Path] = {f.stem.lower(): f for f in cfg.sfr_old_dir.glob("*.h")}
     new_files: Dict[str, Path] = {f.stem.lower(): f for f in cfg.sfr_new_dir.glob("*.h")}
     lld_files: Dict[str, Path] = {f.stem.lower(): f for f in cfg.lld_dir.glob("*.h")}
+    all_lld_paths: List[Path]  = list(lld_files.values())
+
+    # lld_all_files flag: should we apply every SFR change to ALL LLD files?
+    lld_all_files: bool = getattr(cfg, "lld_all_files", False)
 
     jobs: List[IPJob] = []
     matched_old: set = set()
+
+    def _resolve_lld_for_ip(ip: str) -> Optional[Path]:
+        """Find the LLD file for IP, checking ip_overrides first."""
+        override = cfg.ip_overrides.get(ip.upper(), {})
+        explicit = override.get("lld_file", "")
+        if explicit:
+            ep = Path(explicit)
+            if not ep.is_absolute():
+                ep = cfg.lld_dir / ep
+            if ep.exists():
+                return ep
+            logger.warning("[DISCOVER] ip_overrides[%s].lld_file not found: %s", ip, ep)
+        return _find_lld(ip, lld_files, cfg.lld_dir)
+
+    def _make_job(ip: str, old_path: Path, new_path: Path) -> List[IPJob]:
+        """Build one or more IPJob entries for an SFR pair."""
+        tst_dir = _ensure_dir(cfg.tests_dir) if cfg.tests_dir else None
+        if lld_all_files:
+            # Produce one job per LLD file in lld_dir
+            job_list = []
+            for lld_path in all_lld_paths:
+                out_lld = _out_path(cfg.output_dir, lld_path)
+                job_list.append(IPJob(
+                    ip=ip, old_sfr=old_path, new_sfr=new_path,
+                    lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
+                ))
+            if not job_list:
+                logger.warning("[DISCOVER] lld_all_files=true but no .h files found in %s", cfg.lld_dir)
+            return job_list
+        else:
+            lld_path = _resolve_lld_for_ip(ip)
+            out_lld  = _out_path(cfg.output_dir, lld_path) if lld_path else None
+            if not lld_path:
+                logger.warning(
+                    "[DISCOVER] No LLD file for IP=%s in %s. "
+                    "Tip: set ip_overrides[%s].lld_file in your YAML, "
+                    "or use lld_all_files: true to patch all LLD files. "
+                    "Only cross-file AST refactoring will run for this IP.",
+                    ip, cfg.lld_dir, ip,
+                )
+            return [IPJob(ip=ip, old_sfr=old_path, new_sfr=new_path,
+                          lld=lld_path, out_lld=out_lld, tests_dir=tst_dir)]
 
     # ── Rule 1: same basename in both dirs ──────────────────────────────────
     for stem, old_path in old_files.items():
         if stem in new_files:
             ip = _ip_from_filename(old_path)
             new_path = new_files[stem]
-            lld_path = _find_lld(ip, lld_files, cfg.lld_dir)
-            out_lld  = _out_path(cfg.output_dir, lld_path) if lld_path else None
-            tst_dir  = _ensure_dir(cfg.tests_dir) if cfg.tests_dir else None
-            if not lld_path:
-                logger.warning("No LLD file found for IP=%s in %s. Only performing cross-file AST refactoring.", ip, cfg.lld_dir)
-            jobs.append(IPJob(
-                ip=ip, old_sfr=old_path, new_sfr=new_path,
-                lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
-            ))
+            jobs.extend(_make_job(ip, old_path, new_path))
             matched_old.add(stem)
 
     # ── Rule 2: _old/_new suffix pairing ────────────────────────────────────
     for stem, old_path in old_files.items():
         if stem in matched_old:
             continue
-        # Check if this looks like a *_old.h file
         for old_suf in ("_old", "_prev", "_v1", "_baseline", "_bak"):
             if stem.endswith(old_suf):
                 base = stem[: -len(old_suf)]
-                # Find matching new file
                 new_stem = None
                 for new_suf in ("_new", "_updated", "_v2", "_latest"):
                     candidate = base + new_suf
@@ -483,19 +526,13 @@ def discover_jobs(cfg: PatcherConfig) -> List[IPJob]:
                         new_stem = candidate
                         break
                 if new_stem is None and base in new_files:
-                    new_stem = base   # same name without suffix
+                    new_stem = base
                 if new_stem:
-                    ip = _ip_from_filename(old_path).replace(old_suf.upper().lstrip("_"), "").rstrip("_") or _ip_from_filename(old_path)
+                    ip = _ip_from_filename(old_path).replace(
+                        old_suf.upper().lstrip("_"), ""
+                    ).rstrip("_") or _ip_from_filename(old_path)
                     new_path = new_files[new_stem]
-                    lld_path = _find_lld(ip, lld_files, cfg.lld_dir)
-                    out_lld = _out_path(cfg.output_dir, lld_path) if lld_path else None
-                    tst_dir = _ensure_dir(cfg.tests_dir) if cfg.tests_dir else None
-                    if not lld_path:
-                        logger.warning("No LLD file found for IP=%s in %s. Only performing cross-file AST refactoring.", ip, cfg.lld_dir)
-                    jobs.append(IPJob(
-                        ip=ip, old_sfr=old_path, new_sfr=new_path,
-                        lld=lld_path, out_lld=out_lld, tests_dir=tst_dir,
-                    ))
+                    jobs.extend(_make_job(ip, old_path, new_path))
                     matched_old.add(stem)
                 break
 
