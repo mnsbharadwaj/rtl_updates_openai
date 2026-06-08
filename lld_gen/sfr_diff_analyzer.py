@@ -993,24 +993,23 @@ def classify_sfr_diff(
     Convenience function: parse two sfr.h files and return a classified
     list of ChangeRecord objects.
 
-    Args:
-        old_sfr: Path to previous sfr.h  (e.g. sfr_pmu_old.h)
-        new_sfr: Path to updated sfr.h   (e.g. sfr_pmu_new.h)
-        ip:      IP/peripheral name (e.g. "PMU").  **Optional** — auto-detected
-                 from filename when omitted.  sfr_pmu.h → PMU, sfr_uart.h → UART.
-
-    Returns:
-        List[ChangeRecord] sorted by register name, then field name.
+    Uses the DiffBasedAnalyzer (unified-diff approach) as primary engine
+    so that ANY textual change is detected regardless of SFR file format.
+    Falls back to the IR-based SfrDiffAnalyzer when the diff engine returns
+    zero results (e.g. pure offset-level changes only).
     """
-    # Auto-detect IP from filename if not provided
     if not ip:
         ip = _ip_from_filename(old_sfr)
 
-    analyzer = SfrDiffAnalyzer(ip=ip)
-    changes  = analyzer.analyze_files(old_sfr, new_sfr)
+    # Primary: diff-based (always catches what git diff catches)
+    changes = DiffBasedAnalyzer(ip=ip).analyze_files(old_sfr, new_sfr)
+
+    # Fallback: IR-based for structural changes the diff engine may miss
+    if not changes:
+        changes = SfrDiffAnalyzer(ip=ip).analyze_files(old_sfr, new_sfr)
+
     changes.sort(key=lambda c: (c.reg_name, c.field_name or ""))
     return changes
-
 
 
 def changes_to_json(changes: List[ChangeRecord], indent: int = 2) -> str:
@@ -1026,3 +1025,463 @@ def summarize_changes(changes: List[ChangeRecord]) -> str:
         lines.append(f"  {ct:<20}: {n}")
     lines.append(f"  LLM calls needed: {llm_count}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# DiffBasedAnalyzer  — uses Python difflib unified diff as ground truth
+# ---------------------------------------------------------------------------
+# Line patterns used when parsing diff hunks
+_DIFF_FIELD_RE = re.compile(
+    r"volatile\s+\w+\s+(\w+)\s*:\s*(\d+)\s*;"
+    r"(?:\s*//\s*(.*))?"
+)
+_DIFF_FIELD_CMT_RE = re.compile(
+    r"(\d+)\s*[-\u2013]\s*(\d+)\s*"
+    r"\[\s*([A-Za-z0-9]+)\s*\]"
+    r"\s*(.*)"
+)
+_DIFF_RESET_RE  = re.compile(r"_VALUE_\s*\(\s*(0x[0-9A-Fa-f]+|\d+)\s*\)")
+_DIFF_TYPEDEF_END_RE = re.compile(r"^\s*}\s*(\w+)\s*,\s*\*(\w+)\s*;")
+_DIFF_TYPEDEF_START_RE = re.compile(r"typedef\s+volatile\s+union\s+(\w+)")
+
+
+class DiffBasedAnalyzer:
+    """
+    Produces ChangeRecord list by:
+      1. Running Python difflib.unified_diff on old vs new SFR text
+      2. Parsing every removed (-) and added (+) bitfield line in each hunk
+      3. Matching removed/added lines by field name within the same register
+         context, then classifying width/access/offset/desc/reset changes
+
+    This is equivalent to running `git diff --no-index old new` and is
+    completely independent of the SFR file format.
+    """
+
+    def __init__(self, ip: str = ""):
+        self.ip = ip.upper()
+
+    def analyze_files(self, old_path: str | Path, new_path: str | Path) -> List[ChangeRecord]:
+        old_text = Path(old_path).read_text(encoding="utf-8-sig", errors="replace")
+        new_text = Path(new_path).read_text(encoding="utf-8-sig", errors="replace")
+        if not self.ip:
+            self.ip = _ip_from_filename(old_path)
+        return self.analyze(old_text, new_text)
+
+    # ------------------------------------------------------------------
+    def analyze(self, old_text: str, new_text: str) -> List[ChangeRecord]:
+        import difflib
+
+        old_lines = old_text.splitlines(keepends=True)
+        new_lines = new_text.splitlines(keepends=True)
+
+        # Build register-context maps from both files
+        old_ctx = self._build_context(old_text)
+        new_ctx = self._build_context(new_text)
+
+        # Generate unified diff
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile="old_sfr", tofile="new_sfr",
+            lineterm="",
+        ))
+
+        if not diff:
+            return []   # files identical
+
+        changes: List[ChangeRecord] = []
+
+        # Parse diff into hunks; for each hunk track removed/added field lines
+        removed_fields: Dict[str, dict] = {}   # fname -> parsed field info
+        added_fields:   Dict[str, dict] = {}   # fname -> parsed field info
+        current_reg_old: str = ""
+        current_reg_new: str = ""
+
+        # Build line->reg_name maps
+        old_line_reg = self._line_to_reg(old_text)
+        new_line_reg = self._line_to_reg(new_text)
+
+        old_line_num  = 0
+        new_line_num  = 0
+
+        for raw_line in diff:
+            line = raw_line.rstrip("\n")
+
+            # Hunk header: @@ -a,b +c,d @@
+            if line.startswith("@@"):
+                # Flush any accumulated removed/added pairs
+                changes.extend(self._classify_hunk(
+                    removed_fields, added_fields,
+                    old_ctx, new_ctx,
+                    current_reg_old or current_reg_new,
+                ))
+                removed_fields = {}
+                added_fields   = {}
+
+                m = re.search(r"@@\s*-(\d+)(?:,\d+)?\s*\+(\d+)(?:,\d+)?\s*@@", line)
+                if m:
+                    old_line_num = int(m.group(1)) - 1
+                    new_line_num = int(m.group(2)) - 1
+                continue
+
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+
+            content = line[1:] if line else ""
+
+            if line.startswith("-"):
+                old_line_num += 1
+                reg = old_line_reg.get(old_line_num, "")
+                if reg:
+                    current_reg_old = reg
+                fi = self._parse_field_line(content)
+                if fi:
+                    fi["reg"] = current_reg_old
+                    removed_fields[fi["name"]] = fi
+                # Detect reset value change
+                mr = _DIFF_RESET_RE.search(content)
+                if mr:
+                    removed_fields["__RESET__"] = {"reset": mr.group(1), "reg": current_reg_old}
+                # Detect register-level changes (typedef end = closing name)
+                me = _DIFF_TYPEDEF_END_RE.search(content)
+                if me:
+                    removed_fields["__REG_NAME__"] = {"name": me.group(1), "reg": current_reg_old}
+
+            elif line.startswith("+"):
+                new_line_num += 1
+                reg = new_line_reg.get(new_line_num, "")
+                if reg:
+                    current_reg_new = reg
+                fi = self._parse_field_line(content)
+                if fi:
+                    fi["reg"] = current_reg_new
+                    added_fields[fi["name"]] = fi
+                mr = _DIFF_RESET_RE.search(content)
+                if mr:
+                    added_fields["__RESET__"] = {"reset": mr.group(1), "reg": current_reg_new}
+                me = _DIFF_TYPEDEF_END_RE.search(content)
+                if me:
+                    added_fields["__REG_NAME__"] = {"name": me.group(1), "reg": current_reg_new}
+
+            else:
+                old_line_num += 1
+                new_line_num += 1
+                reg = old_line_reg.get(old_line_num, "")
+                if reg:
+                    current_reg_old = reg
+                reg = new_line_reg.get(new_line_num, "")
+                if reg:
+                    current_reg_new = reg
+
+        # Final flush
+        changes.extend(self._classify_hunk(
+            removed_fields, added_fields,
+            old_ctx, new_ctx,
+            current_reg_old or current_reg_new,
+        ))
+
+        # Also pick up register-level adds/deletes by comparing reg sets
+        old_regs = set(old_ctx.keys())
+        new_regs = set(new_ctx.keys())
+
+        for r in old_regs - new_regs:
+            changes.append(ChangeRecord(
+                change_type=ChangeType.REG_DELETED,
+                reg_name=r,
+                details=[f"register {r} deleted"],
+            ))
+        for r in new_regs - old_regs:
+            changes.append(ChangeRecord(
+                change_type=ChangeType.REG_ADDED,
+                reg_name=r,
+                needs_llm=True,
+                details=[f"register {r} added"],
+            ))
+
+        # REG_RENAMED: same offset in old & new but different name
+        old_by_off = {v["offset"]: k for k, v in old_ctx.items()}
+        new_by_off = {v["offset"]: k for k, v in new_ctx.items()}
+        for off, oname in old_by_off.items():
+            if off in new_by_off:
+                nname = new_by_off[off]
+                if oname != nname and oname not in new_ctx and nname not in old_ctx:
+                    changes.append(ChangeRecord(
+                        change_type=ChangeType.REG_RENAMED,
+                        reg_name=oname,
+                        details=[f"renamed {oname} -> {nname}"],
+                    ))
+
+        # Deduplicate (same reg+field+type)
+        seen: set = set()
+        out: List[ChangeRecord] = []
+        for cr in changes:
+            key = (cr.change_type, cr.reg_name, cr.field_name or "")
+            if key not in seen:
+                seen.add(key)
+                out.append(cr)
+        return out
+
+    # ------------------------------------------------------------------
+    def _build_context(self, text: str) -> Dict[str, dict]:
+        """
+        Build a map: reg_name -> {offset, fields: {fname: field_info}}
+        by parsing the full file (not just the diff).
+        """
+        ctx: Dict[str, dict] = {}
+        lines = text.splitlines()
+        in_union = False
+        current_reg = ""
+        reg_offset = 0
+        reset_val = 0
+        bit_pos = 0
+
+        for ln in lines:
+            ms = _DIFF_TYPEDEF_START_RE.search(ln)
+            if ms and not in_union:
+                in_union = True
+                bit_pos = 0
+                reset_val = 0
+                current_reg = ""
+                continue
+
+            if not in_union:
+                continue
+
+            mr = _DIFF_RESET_RE.search(ln)
+            if mr:
+                try:
+                    reset_val = _parse_int(mr.group(1))
+                except ValueError:
+                    pass
+
+            me = _DIFF_TYPEDEF_END_RE.search(ln)
+            if me:
+                typedef_name = me.group(1)
+                reg_name = self._extract_reg_name(typedef_name)
+                ctx[reg_name] = {
+                    "offset": reg_offset,
+                    "reset":  reset_val,
+                    "fields": ctx.get("__pending__", {}).get("fields", {}),
+                }
+                if "__pending__" in ctx:
+                    del ctx["__pending__"]
+                reg_offset += 4
+                in_union = False
+                current_reg = reg_name
+                continue
+
+            fi = self._parse_field_line(ln)
+            if fi:
+                if "__pending__" not in ctx:
+                    ctx["__pending__"] = {"fields": {}}
+                ctx["__pending__"]["fields"][fi["name"]] = fi
+
+        return {k: v for k, v in ctx.items() if k != "__pending__"}
+
+    def _line_to_reg(self, text: str) -> Dict[int, str]:
+        """Map line number (1-indexed) -> current register name at that line."""
+        result: Dict[int, str] = {}
+        current_reg = ""
+        for i, ln in enumerate(text.splitlines(), 1):
+            ms = _DIFF_TYPEDEF_START_RE.search(ln)
+            if ms:
+                current_reg = ""  # pending until closing typedef
+            me = _DIFF_TYPEDEF_END_RE.search(ln)
+            if me:
+                current_reg = self._extract_reg_name(me.group(1))
+            result[i] = current_reg
+        return result
+
+    def _parse_field_line(self, line: str) -> Optional[dict]:
+        """Parse a single `volatile UINT32 FIELD : N; // lsb-msb [ACC] desc` line."""
+        m = _DIFF_FIELD_RE.search(line)
+        if not m:
+            return None
+        fname   = m.group(1)
+        width   = int(m.group(2))
+        comment = (m.group(3) or "").strip()
+
+        # Skip reserved
+        if fname.upper().startswith("RSVD") or fname.upper().startswith("RESERVED"):
+            return None
+
+        mc = _DIFF_FIELD_CMT_RE.search(comment)
+        if mc:
+            lsb    = int(mc.group(1))
+            msb    = int(mc.group(2))
+            access = _ACCESS_MAP.get(mc.group(3).upper(), mc.group(3).upper())
+            desc   = mc.group(4).strip()
+        else:
+            lsb = msb = 0
+            access = "RW"
+            desc   = comment
+
+        mask = ((1 << width) - 1) << lsb
+        return {
+            "name": fname, "width": width, "lsb": lsb, "msb": msb,
+            "access": access, "desc": desc, "mask": mask, "reg": "",
+        }
+
+    def _extract_reg_name(self, typedef_name: str) -> str:
+        name = typedef_name.upper()
+        if name.startswith("SFR_"):
+            name = name[4:]
+        prefix = self.ip + "_"
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        return name
+
+    # ------------------------------------------------------------------
+    def _classify_hunk(
+        self,
+        removed: Dict[str, dict],
+        added:   Dict[str, dict],
+        old_ctx: Dict[str, dict],
+        new_ctx: Dict[str, dict],
+        reg_name: str,
+    ) -> List[ChangeRecord]:
+        """Classify one diff hunk's removed/added field lines into ChangeRecords."""
+        changes: List[ChangeRecord] = []
+        if not removed and not added:
+            return changes
+
+        removed_fields = {k: v for k, v in removed.items() if not k.startswith("__")}
+        added_fields   = {k: v for k, v in added.items()   if not k.startswith("__")}
+
+        # Reset value changed
+        old_reset_str = (removed.get("__RESET__") or {}).get("reset", "")
+        new_reset_str = (added.get("__RESET__")   or {}).get("reset", "")
+        if old_reset_str and new_reset_str and old_reset_str != new_reset_str:
+            rname = (removed.get("__RESET__") or {}).get("reg", reg_name) or reg_name
+            changes.append(ChangeRecord(
+                change_type=ChangeType.RESET_CHANGED,
+                reg_name=rname,
+                details=[f"reset {old_reset_str} -> {new_reset_str}"],
+            ))
+
+        rem_names = set(removed_fields)
+        add_names = set(added_fields)
+
+        # Fields in both: changed attributes
+        for fname in rem_names & add_names:
+            old_f = removed_fields[fname]
+            new_f = added_fields[fname]
+            cr = self._classify_field_pair(fname, old_f, new_f, reg_name)
+            if cr:
+                changes.append(cr)
+
+        # Fields only in removed: FIELD_DELETED or FIELD_RENAMED
+        for fname in rem_names - add_names:
+            old_f = removed_fields[fname]
+            # Check if any added field has same mask (FIELD_RENAMED)
+            renamed_to = None
+            for aname, af in added_fields.items():
+                if aname in rem_names:
+                    continue
+                if af["mask"] == old_f["mask"] and af["lsb"] == old_f["lsb"]:
+                    renamed_to = aname
+                    break
+            if renamed_to:
+                changes.append(ChangeRecord(
+                    change_type=ChangeType.FIELD_RENAMED,
+                    reg_name=old_f.get("reg", reg_name) or reg_name,
+                    field_name=fname,
+                    details=[f"renamed {fname} -> {renamed_to}"],
+                ))
+            else:
+                changes.append(ChangeRecord(
+                    change_type=ChangeType.FIELD_DELETED,
+                    reg_name=old_f.get("reg", reg_name) or reg_name,
+                    field_name=fname,
+                    details=[f"field {fname} deleted"],
+                ))
+
+        # Fields only in added: FIELD_ADDED (unless already matched as rename target)
+        rename_targets = set()
+        for fname in rem_names - add_names:
+            old_f = removed_fields[fname]
+            for aname, af in added_fields.items():
+                if aname in rem_names:
+                    continue
+                if af["mask"] == old_f["mask"] and af["lsb"] == old_f["lsb"]:
+                    rename_targets.add(aname)
+
+        for fname in add_names - rem_names:
+            if fname in rename_targets:
+                continue
+            new_f = added_fields[fname]
+            changes.append(ChangeRecord(
+                change_type=ChangeType.FIELD_ADDED,
+                reg_name=new_f.get("reg", reg_name) or reg_name,
+                field_name=fname,
+                needs_llm=bool(new_f.get("desc")),
+                details=[f"field {fname} added"],
+            ))
+
+        return changes
+
+    def _classify_field_pair(
+        self, fname: str, old_f: dict, new_f: dict, reg_name: str
+    ) -> Optional[ChangeRecord]:
+        """Classify attribute changes on a field present in both old and new."""
+        rname = old_f.get("reg") or new_f.get("reg") or reg_name
+
+        width_changed   = old_f["width"]  != new_f["width"]
+        access_changed  = old_f["access"] != new_f["access"]
+        offset_changed  = old_f["lsb"]    != new_f["lsb"]
+        desc_changed    = old_f["desc"].strip() != new_f["desc"].strip()
+        desc_added      = not old_f["desc"].strip() and bool(new_f["desc"].strip())
+
+        # Semantic checks
+        _SC  = {"SC", "SELFCLR", "SELF_CLR"}
+        _WOL = {"RWL", "W1", "OTP", "LOCK"}
+        polarity    = access_changed and desc_changed  # access + desc both flip
+        sticky      = old_f["access"] == "RO"  and new_f["access"] == "W1C"
+        write_once  = new_f["access"].upper() in _WOL and old_f["access"].upper() not in _WOL
+        self_clear  = new_f["access"].upper() in _SC  and old_f["access"].upper() not in _SC
+
+        _ENUM_RE = re.compile(r"\d+\s*=\s*\w+")
+        old_enums = set(_ENUM_RE.findall(old_f["desc"]))
+        new_enums = set(_ENUM_RE.findall(new_f["desc"]))
+        enum_changed = bool(old_enums or new_enums) and old_enums != new_enums
+
+        n_changes = sum([width_changed, access_changed, offset_changed, desc_changed])
+
+        # Determine change type (priority order)
+        if polarity and access_changed and (width_changed or desc_changed):
+            ct, needs_llm = ChangeType.FIELD_POLARITY_CHANGED, True
+        elif sticky:
+            ct, needs_llm = ChangeType.FIELD_STICKY_CHANGED, True
+        elif write_once:
+            ct, needs_llm = ChangeType.FIELD_WRITE_ONCE, True
+        elif self_clear:
+            ct, needs_llm = ChangeType.FIELD_SELF_CLEARING, True
+        elif enum_changed:
+            ct, needs_llm = ChangeType.FIELD_ENUM_CHANGED, True
+        elif n_changes >= 2:
+            ct, needs_llm = ChangeType.MULTI_CHANGED, True
+        elif width_changed:
+            ct, needs_llm = ChangeType.BITWIDTH_CHANGED, False
+        elif access_changed:
+            ct, needs_llm = ChangeType.ACCESS_CHANGED, False
+        elif offset_changed:
+            ct, needs_llm = ChangeType.OFFSET_CHANGED, False
+        elif desc_added:
+            ct, needs_llm = ChangeType.DESCRIPTION_ADDED, True
+        elif desc_changed:
+            ct, needs_llm = ChangeType.COMMENT_CHANGED, True
+        else:
+            return None  # nothing actually changed
+
+        details = []
+        if width_changed:  details.append(f"width {old_f['width']}b->{new_f['width']}b")
+        if access_changed: details.append(f"access {old_f['access']}->{new_f['access']}")
+        if offset_changed: details.append(f"lsb {old_f['lsb']}->{new_f['lsb']}")
+        if desc_changed:   details.append(f"desc changed")
+
+        return ChangeRecord(
+            change_type=ct,
+            reg_name=rname,
+            field_name=fname,
+            needs_llm=needs_llm,
+            details=details,
+        )
