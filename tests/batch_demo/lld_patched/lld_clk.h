@@ -15,6 +15,27 @@
 #include <stdint.h>
 #include "sfr_clk.h"
 
+/* === BEGIN LLD_CLK_STRUCTS === */
+/* SFR Aggregate Struct (auto-generated from new SFR — DO NOT EDIT) */
+typedef volatile struct _SFR_CLK_S
+{
+    SFR_CLK_CLK_CON                      stCLK_CON;  /* offset 0x0000 */
+    SFR_CLK_PLL_CTRL                     stPLL_CTRL;  /* offset 0x0004 */
+    SFR_CLK_DIV_CON                      stDIV_CON;  /* offset 0x0008 */
+    SFR_CLK_SPREAD_CON                   stSPREAD_CON;  /* offset 0x000C */
+    SFR_CLK_RST_CON                      stRST_CON;  /* offset 0x0010 */
+    SFR_CLK_IRQ_CON                      stIRQ_CON;  /* offset 0x0014 */
+    SFR_CLK_CLK_STATUS                   stCLK_STATUS;  /* offset 0x0018 */
+    SFR_CLK_RESET_CON                    stRESET_CON;  /* offset 0x001C */
+} SFR_CLK, *pSFR_CLK;
+
+/* LLD Driver Struct */
+struct lld_clk {
+    pSFR_CLK pSFR;  /* pointer to hardware register block */
+};
+/* === END LLD_CLK_STRUCTS === */
+
+
 /* ── LLD handle ──────────────────────────────────────────────────────────── */
 struct lld_clk {
     pSFR_CLK pSFR;
