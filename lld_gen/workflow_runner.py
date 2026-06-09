@@ -14,13 +14,67 @@ Full pipeline:
   [G] Atomic commit      → one git commit per SFR file changed
   [H] Push + raise PR    → Bitbucket REST API
 
-Usage:
-    from lld_gen.workflow_runner import WorkflowRunner
-    from lld_gen.config import load_workflow_config
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    cfg = load_workflow_config("workflow_config.yaml")
-    runner = WorkflowRunner(cfg)
-    results = runner.run()
+1. NORMAL MODE  (clean summary output)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.workflow_runner --config workflow_config.yaml
+   python -m lld_gen.workflow_runner -c configs/workflow_config.yaml
+
+2. VERBOSE MODE  (per-change category + before/after diffs for LLM patches)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.workflow_runner --config workflow_config.yaml --verbose
+   python -m lld_gen.workflow_runner -c workflow_config.yaml -v
+
+3. VERBOSE + DEBUG LOG  (all logger.debug() lines also visible)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.workflow_runner -c workflow_config.yaml -v --log-level DEBUG
+
+4. FROM PYTHON CODE
+   ─────────────────────────────────────────────────────────────────────
+   from lld_gen.workflow_runner import run_workflow
+   result = run_workflow("workflow_config.yaml")             # normal
+   result = run_workflow("workflow_config.yaml", verbose=True)  # verbose
+
+   # Or use the class directly:
+   from lld_gen.config import load_workflow_config
+   from lld_gen.workflow_runner import WorkflowRunner
+   cfg    = load_workflow_config("workflow_config.yaml")
+   runner = WorkflowRunner(cfg, verbose=True)
+   result = runner.run()
+
+CONFIG FILE:  workflow_config.yaml
+   sfr_old_dir   : path/to/old_sfr/        # current SFR *.h in LLD repo
+   sfr_new_dir   : path/to/new_sfr/        # new SFR *.h from IPxact
+   lld_dir       : path/to/lld/            # LLD repo headers
+   output_dir    : path/to/output/         # patched LLD files
+   tests_dir     : path/to/tests/          # generated unit test .c files
+   no_llm        : false                   # true = template-only mode
+   no_git        : false                   # true = skip commit/PR
+   compile_check : false                   # true = run GCC after each patch
+   cross_lld_scan: true                    # scan all LLD files for cross-refs
+   llm:
+     backend  : ollama                     # ollama | openai | openai_compat
+     model    : qwen2.5-coder:7b           # model name
+     url      : http://localhost:11434     # local ollama
+     location : local                      # local | cloud
+     # For cloud endpoint:
+     # url     : http://107.99.41.85/ollama/srv1/api/generate
+     # model   : gpt-oss
+     # location: cloud
+   ipxact:
+     url    : https://bitbucket.org/org/ipxact.git
+     branch : main
+     path   : ip/
+   lld_repo:
+     url    : https://bitbucket.org/org/lld.git
+     branch : develop
+     token  : ""                           # or set BB_TOKEN env var
+   pr_target:
+     branch : main
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from __future__ import annotations
 

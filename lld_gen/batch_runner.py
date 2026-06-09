@@ -2,13 +2,64 @@
 batch_runner.py -- Batch pipeline runner driven by lld_patcher.yaml config
 
 For every SFR old/new pair found under sfr_old_dir / sfr_new_dir:
-  1. Diff old vs new SFR -> classify changes
+  1. Diff old vs new SFR -> classify changes (28 change types)
   2. Scan ALL .h files in lld_dir (using AST/regex) for functions that
      reference the changed registers/fields -- no 1-to-1 naming required
   3. Copy each matching LLD file to output_dir and patch it
      (template or LLM depending on change type and config)
   4. Write generated unit-test file to tests_dir
   5. Print a summary report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO RUN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. NORMAL MODE  (clean summary output)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.batch_runner --config lld_patcher.yaml
+   python -m lld_gen.batch_runner -c configs/lld_patcher.yaml
+
+2. VERBOSE MODE  (per-change category + before/after diffs for LLM patches)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.batch_runner --config lld_patcher.yaml --verbose
+   python -m lld_gen.batch_runner -c lld_patcher.yaml -v
+
+3. VERBOSE + DEBUG LOG  (all logger.debug() lines also visible)
+   ─────────────────────────────────────────────────────────────────────
+   python -m lld_gen.batch_runner -c lld_patcher.yaml -v --log-level DEBUG
+
+4. FROM PYTHON CODE
+   ─────────────────────────────────────────────────────────────────────
+   from lld_gen.batch_runner import run_from_config
+   results = run_from_config("lld_patcher.yaml")            # normal
+   results = run_from_config("lld_patcher.yaml", verbose=True)  # verbose
+
+   # Or use the class directly:
+   from lld_gen.config import load_config
+   from lld_gen.batch_runner import BatchRunner
+   cfg     = load_config("lld_patcher.yaml")
+   runner  = BatchRunner(cfg, verbose=True)
+   results = runner.run()
+
+CONFIG FILE:  lld_patcher.yaml
+   sfr_old_dir : path/to/old_sfr/          # folder with old SFR *.h files
+   sfr_new_dir : path/to/new_sfr/          # folder with new SFR *.h files
+   lld_dir     : path/to/lld/              # folder scanned for ALL lld *.h
+   output_dir  : path/to/output/           # patched LLD files written here
+   tests_dir   : path/to/tests/            # generated unit test .c files
+   no_llm      : false                     # true = template-only mode
+   no_git      : false                     # true = skip PR/git staging
+   compile_check: false                    # true = run GCC after patch
+   llm:
+     backend  : ollama                     # ollama | openai | openai_compat
+     model    : qwen2.5-coder:7b           # model name
+     url      : http://localhost:11434     # local ollama
+     location : local                      # local | cloud
+     # For cloud endpoint:
+     # url     : http://107.99.41.85/ollama/srv1/api/generate
+     # model   : gpt-oss
+     # location: cloud
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from __future__ import annotations
 
