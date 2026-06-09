@@ -42,6 +42,8 @@ from lld_gen.llm_client import LLMClient, make_llm_client
 from lld_gen.compile_check import run_compile_check, run_compile_check_one_fn
 from lld_gen.pr_stage import stage_pr, build_pr_description
 from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
+# Reuse verbose helpers from batch_runner (same callback, same method lookup)
+from lld_gen.batch_runner import _print_before_after, _change_method
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +125,9 @@ class WorkflowRunner:
       H: Push + create Bitbucket PR
     """
 
-    def __init__(self, cfg: WorkflowConfig):
-        self.cfg = cfg
+    def __init__(self, cfg: WorkflowConfig, verbose: bool = False):
+        self.cfg      = cfg
+        self.verbose  = verbose
         self._work_dir = Path(tempfile.mkdtemp(prefix="lld_workflow_"))
         self._ipxact_gm:  Optional[GitManager] = None
         self._lld_gm:     Optional[GitManager] = None
@@ -320,10 +323,14 @@ class WorkflowRunner:
             from lld_gen.sfr_diff_analyzer import SfrParser
             new_ir = SfrParser(ip=ip).parse_file(new_sfr)
 
+            # Build verbose callback if enabled (reused from batch_runner)
+            verbose_cb = _print_before_after if self.verbose else None
+
             patcher = LLDPatcher(
-                ip         = ip,
-                llm_client = llm_client,
-                no_llm     = cfg.no_llm,
+                ip               = ip,
+                llm_client       = llm_client,
+                no_llm           = cfg.no_llm,
+                verbose_callback = verbose_cb,
             )
             try:
                 patcher.patch(
@@ -337,6 +344,22 @@ class WorkflowRunner:
                 result.error  = f"Patcher error: {exc}"
                 logger.error(f"  [E] FAIL: {exc}")
                 return result
+
+            # Verbose patch summary per LLD file
+            if self.verbose:
+                logger.info("  [E]")
+                logger.info("  [E] [V] Patch summary for %s:", lld_file.name)
+                for cr in auto_crs:
+                    fld    = f".{cr.field_name}" if cr.field_name else ""
+                    method = _change_method(cr.change_type, llm_client is not None and llm_client.available)
+                    logger.info("  [E] [V]   ✔ %-28s  [%s%s]  via: %s",
+                                cr.change_type, cr.reg_name, fld, method)
+                manual_in_auto = [cr for cr in auto_crs
+                                  if ChangeType.is_manual_review(cr.change_type)]
+                for cr in manual_in_auto:
+                    fld = f".{cr.field_name}" if cr.field_name else ""
+                    logger.info("  [E] [V]   ⚠ %-28s  [%s%s]  → MANUAL REVIEW",
+                                cr.change_type, cr.reg_name, fld)
 
             # Write test file
             tests_dir = cfg.tests_dir
@@ -744,11 +767,75 @@ def _build_manual_review_section(
 # ---------------------------------------------------------------------------
 # Convenience entry point
 # ---------------------------------------------------------------------------
-def run_workflow(config_path: "str | Path") -> WorkflowRunResult:
+def run_workflow(config_path: "str | Path", verbose: bool = False) -> WorkflowRunResult:
     """
     Load a workflow_config.yaml and run the full pipeline.
     Returns WorkflowRunResult.
     """
     from lld_gen.config import load_workflow_config
     cfg = load_workflow_config(config_path)
-    return WorkflowRunner(cfg).run()
+    return WorkflowRunner(cfg, verbose=verbose).run()
+
+
+# ---------------------------------------------------------------------------
+# CLI main (python -m lld_gen.workflow_runner --config <yaml> [--verbose])
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """
+    Command-line entry point for the end-to-end workflow runner.
+
+    Usage:
+        python -m lld_gen.workflow_runner --config workflow_config.yaml [--verbose]
+
+    Flags:
+        --config  / -c   Path to workflow_config.yaml  (required)
+        --verbose / -v   Enable verbose output:
+                           - Per-change category + application method log
+                           - Before/after function diff for LLM-patched large blocks
+                           - Full patch summary per LLD file
+        --log-level      Python log level: DEBUG|INFO|WARNING|ERROR (default INFO)
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="lld_workflow_runner",
+        description="LLD Auto-Patcher — end-to-end workflow driven by workflow_config.yaml",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        required=True,
+        metavar="YAML",
+        help="Path to workflow_config.yaml",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        default=False,
+        help=(
+            "Verbose output: per-change category logs, before/after diffs "
+            "for LLM-patched large functions, full patch summary per LLD file"
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging verbosity (default: INFO)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+
+    result = run_workflow(args.config, verbose=args.verbose)
+    if not result.all_ok:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
