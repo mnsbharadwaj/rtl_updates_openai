@@ -18,7 +18,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from lld_gen.config import (
     PatcherConfig, IPJob, load_config, discover_jobs,
@@ -85,6 +85,113 @@ def _fail(msg: str) -> None:
 def _step_done(label: str = "done") -> None:
     logger.info("  └─ %s", label)
     logger.info("")
+
+
+# ---------------------------------------------------------------------------
+# Verbose helpers
+# ---------------------------------------------------------------------------
+_LARGE_BLOCK_CHARS = 800   # threshold to print before/after in verbose mode
+
+
+def _vlog(msg: str) -> None:
+    """Verbose-only log line — same indent as _info but with V prefix."""
+    logger.info("  │  [V]  %s", msg)
+
+
+def _change_method(change_type: str, used_llm: bool) -> str:
+    """Human-readable description of how a change will be applied."""
+    # Categories that always use the template (deterministic AST patch)
+    template_only = {
+        ChangeType.REG_RENAMED, ChangeType.FIELD_RENAMED,
+        ChangeType.FIELD_DELETED, ChangeType.FIELD_ADDED,
+        ChangeType.BITWIDTH_CHANGED, ChangeType.ACCESS_CHANGED,
+        ChangeType.OFFSET_CHANGED, ChangeType.RESET_CHANGED,
+        ChangeType.REG_MOVED, ChangeType.REG_SIZE_CHANGED,
+        ChangeType.FIELD_SPLIT, ChangeType.FIELD_MERGED,
+        ChangeType.FIELD_MOVED_CROSS_REG,
+        ChangeType.RESERVED_PROMOTED, ChangeType.RESERVED_PARTIAL_ACTIVATED,
+        ChangeType.FIELD_WRITE_ONCE, ChangeType.FIELD_SELF_CLEARING,
+        ChangeType.FIELD_STICKY_CHANGED,
+    }
+    # Categories that go to LLM (with template fallback)
+    llm_preferred = {
+        ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED,
+        ChangeType.FIELD_POLARITY_CHANGED, ChangeType.DESCRIPTION_ADDED,
+        ChangeType.FIELD_ENUM_CHANGED,
+    }
+    # Categories that are manual review
+    manual = {
+        ChangeType.REG_ADDED, ChangeType.REG_DELETED,
+        ChangeType.REG_ARRAY_CHANGED, ChangeType.REG_CLUSTER_CHANGED,
+        ChangeType.WRITE_MASK_CHANGED,
+    }
+    if change_type in manual:
+        return "MANUAL REVIEW — not auto-patched"
+    if change_type in template_only:
+        return "template (deterministic AST patch)"
+    if change_type in llm_preferred:
+        return "LLM (cloud gpt-oss)" if used_llm else "template fallback (LLM unavailable/skipped)"
+    return "LLM / template" if used_llm else "template"
+
+
+def _extract_fn_snippets(block: str, max_chars: int = 600) -> str:
+    """
+    Extract a readable snippet of C functions from a register block.
+    Returns at most max_chars characters to keep logs tidy.
+    """
+    lines = block.splitlines()
+    # Skip the SHA header comment block — find first 'static inline' line
+    fn_start = next(
+        (i for i, ln in enumerate(lines) if "static inline" in ln or "/**" in ln),
+        0
+    )
+    snippet = "\n".join(lines[fn_start:])
+    if len(snippet) > max_chars:
+        snippet = snippet[:max_chars] + "\n  // ... [truncated]"
+    return snippet
+
+
+def _print_before_after(
+    reg_name: str,
+    field_name: str,
+    change_type: str,
+    before: str,
+    after: str,
+    used_llm: bool,
+    lld_file: str,
+) -> None:
+    """
+    Verbose printer: emit a before/after diff for one LLD function change.
+    Always prints category + application method.
+    For large blocks or LLM-patched blocks, also prints the function diff.
+    """
+    method = _change_method(change_type, used_llm)
+    label  = f"{reg_name}.{field_name}" if field_name else reg_name
+    llm_tag = " ✓LLM" if used_llm else ""
+
+    logger.info("  │")
+    logger.info("  │  ├── [VERBOSE] Change applied in: %s", lld_file)
+    logger.info("  │  │   Field    : %s", label)
+    logger.info("  │  │   Type     : %-30s  Method: %s%s",
+                change_type, method, llm_tag)
+
+    # Only print before/after for changed blocks or LLM-patched
+    is_large   = len(before) > _LARGE_BLOCK_CHARS or len(after) > _LARGE_BLOCK_CHARS
+    block_diff = before.strip() != after.strip()
+    if block_diff and (used_llm or is_large):
+        before_snip = _extract_fn_snippets(before)
+        after_snip  = _extract_fn_snippets(after)
+        logger.info("  │  │   ── BEFORE ──")
+        for ln in before_snip.splitlines():
+            logger.info("  │  │   - %s", ln)
+        logger.info("  │  │   ── AFTER  ──")
+        for ln in after_snip.splitlines():
+            logger.info("  │  │   + %s", ln)
+    elif block_diff:
+        logger.info("  │  │   (block modified — use --verbose for before/after diff)")
+    else:
+        logger.info("  │  │   (block unchanged — SHA/comment-only update)")
+    logger.info("  │  └%s", "─" * 55)
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +323,9 @@ def _make_llm(cfg: PatcherConfig, ip_overrides: dict, no_llm_override: bool) -> 
 class BatchRunner:
     """Runs the LLD Auto-Patcher pipeline for every SFR pair in config."""
 
-    def __init__(self, cfg: PatcherConfig):
-        self.cfg = cfg
+    def __init__(self, cfg: PatcherConfig, verbose: bool = False):
+        self.cfg     = cfg
+        self.verbose = verbose
         self._results: List[IPResult] = []
 
     # -----------------------------------------------------------------------
@@ -230,6 +338,7 @@ class BatchRunner:
         logger.info("    output_dir  : %s", self.cfg.output_dir)
         logger.info("    tests_dir   : %s", self.cfg.tests_dir)
         logger.info("  LLM mode     : %s", "DISABLED (template-only)" if self.cfg.no_llm else "ENABLED (cloud gpt-oss default)")
+        logger.info("  Verbose mode : %s", "✓ ON  (before/after diffs for LLM patches)" if self.verbose else "OFF (pass --verbose to enable)")
         logger.info(_bar())
 
         # ── Discover SFR pairs ───────────────────────────────────────────────
@@ -456,7 +565,16 @@ class BatchRunner:
                 # Patch via LLDPatcher
                 logger.info("  │     Patching via %s ...",
                             "LLM (cloud gpt-oss)" if llm.available else "template")
-                patcher = LLDPatcher(ip=job.ip, llm_client=llm, no_llm=no_llm)
+
+                # Build verbose callback if enabled
+                verbose_cb = _print_before_after if self.verbose else None
+
+                patcher = LLDPatcher(
+                    ip=job.ip,
+                    llm_client=llm,
+                    no_llm=no_llm,
+                    verbose_callback=verbose_cb,
+                )
                 t_patch = time.perf_counter()
                 patcher.patch(
                     lld_path = out_lld,
@@ -466,6 +584,22 @@ class BatchRunner:
                 )
                 patch_s = time.perf_counter() - t_patch
                 logger.info("  │     ✔ Patch complete in %.1fs  →  %s", patch_s, out_lld)
+
+                if self.verbose:
+                    # Summarise what was patched in this file
+                    auto_ct    = [cr for cr in relevant_changes if not ChangeType.is_manual_review(cr.change_type)]
+                    manual_ct  = [cr for cr in relevant_changes if  ChangeType.is_manual_review(cr.change_type)]
+                    logger.info("  │")
+                    logger.info("  │  [V] Patch summary for %s:", lld_src.name)
+                    for cr in auto_ct:
+                        fld = f".{cr.field_name}" if cr.field_name else ""
+                        method = _change_method(cr.change_type, llm.available)
+                        logger.info("  │  [V]   ✔ %-28s  [%s%s]  via: %s",
+                                    cr.change_type, cr.reg_name, fld, method)
+                    for cr in manual_ct:
+                        fld = f".{cr.field_name}" if cr.field_name else ""
+                        logger.info("  │  [V]   ⚠ %-28s  [%s%s]  → MANUAL REVIEW",
+                                    cr.change_type, cr.reg_name, fld)
 
                 # Write test file
                 lld_text = out_lld.read_text(encoding="utf-8") if out_lld.exists() else ""
@@ -579,8 +713,76 @@ class BatchRunner:
 # ---------------------------------------------------------------------------
 # Convenience entry point
 # ---------------------------------------------------------------------------
-def run_from_config(config_path) -> List[IPResult]:
+def run_from_config(config_path, verbose: bool = False) -> List[IPResult]:
     """Load config and run the full batch pipeline."""
     cfg    = load_config(config_path)
-    runner = BatchRunner(cfg)
+    runner = BatchRunner(cfg, verbose=verbose)
     return runner.run()
+
+
+# ---------------------------------------------------------------------------
+# CLI main (python -m lld_gen.batch_runner --config <yaml> [--verbose])
+# ---------------------------------------------------------------------------
+def main() -> None:
+    """
+    Command-line entry point for the batch runner.
+
+    Usage:
+        python -m lld_gen.batch_runner --config lld_patcher.yaml [--verbose]
+
+    Flags:
+        --config  / -c   Path to lld_patcher.yaml  (required)
+        --verbose / -v   Enable verbose output:
+                           - Per-change category + application method log
+                           - Before/after function diff for LLM-patched blocks
+                           - Full patch summary per LLD file
+        --log-level      Python log level: DEBUG|INFO|WARNING|ERROR (default INFO)
+    """
+    import argparse
+    import sys
+    import logging
+
+    parser = argparse.ArgumentParser(
+        prog="lld_batch_runner",
+        description="LLD Auto-Patcher — batch mode driven by lld_patcher.yaml",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        required=True,
+        metavar="YAML",
+        help="Path to lld_patcher.yaml config file",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        default=False,
+        help=(
+            "Verbose output: per-change category logs, before/after diffs "
+            "for LLM-patched large functions, full patch summary per file"
+        ),
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging verbosity (default: INFO)",
+    )
+    args = parser.parse_args()
+
+    # Configure root logger
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+
+    results = run_from_config(args.config, verbose=args.verbose)
+
+    # Exit with non-zero if any IP failed
+    if any(r.status == "FAIL" for r in results):
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

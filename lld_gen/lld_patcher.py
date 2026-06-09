@@ -612,15 +612,25 @@ class LLDPatcher:
 
     def __init__(
         self,
-        ip:         str,
-        llm_client: Optional[LLMClient] = None,
-        no_llm:     bool = False,
+        ip:              str,
+        llm_client:      Optional[LLMClient] = None,
+        no_llm:          bool = False,
+        verbose_callback = None,
     ):
-        self.ip           = ip.upper()
-        self._llm         = llm_client
-        self._no_llm      = no_llm
+        """
+        verbose_callback — optional callable invoked after each _apply() with:
+            (reg_name:str, field_name:str, change_type:str,
+             before:str, after:str, used_llm:bool, lld_file:str)
+        Use it in BatchRunner to print before/after diffs in verbose mode.
+        """
+        self.ip              = ip.upper()
+        self._llm            = llm_client
+        self._no_llm         = no_llm
+        self._verbose_cb     = verbose_callback   # (reg, field, ct, before, after, llm, file)
         self._test_stubs: List[str] = []
         self._deprecated_fns: List[str] = []
+        self._current_lld_file: str = ""          # set by patch() for callback context
+        self._llm_used_this_apply: bool = False   # reset before each _apply call
 
     # ── File split ──────────────────────────────────────────────────────────
     def _split_blocks(
@@ -790,6 +800,7 @@ class LLDPatcher:
                 old_code=old_code,
                 functions_needed="body_only_signature_locked",
             )
+            self._llm_used_this_apply = True   # ← signal to _apply wrapper
             field_key = old_f.name if old_f else new_f.name
             block = _remove_field_functions_raw(block, self.ip, cr.reg_name, field_key)
             self._test_stubs.extend(self._make_test(cr))
@@ -1107,8 +1118,10 @@ class LLDPatcher:
         backup   = lld_path.with_suffix(".h.bak")
         backup.write_text(original, encoding="utf-8")
 
-        self._test_stubs      = []
-        self._deprecated_fns  = []
+        self._test_stubs          = []
+        self._deprecated_fns      = []
+        self._current_lld_file    = str(lld_path.name)  # for callback context
+        self._llm_used_this_apply = False
 
         # ── Step 1: Update struct section ──────────────────────────────────
         content = original
@@ -1167,7 +1180,20 @@ class LLDPatcher:
 
             for cr in block_changes:
                 logger.info("[%s] %s.%s", cr.change_type, reg_name, cr.field_name or '')
+                before_block = current
+                self._llm_used_this_apply = False
                 current = self._apply(current, sha, cr)
+                # Fire verbose callback if registered
+                if self._verbose_cb is not None:
+                    self._verbose_cb(
+                        reg_name,
+                        cr.field_name or "",
+                        cr.change_type,
+                        before_block,
+                        current,
+                        self._llm_used_this_apply,
+                        self._current_lld_file,
+                    )
 
             # Update SHA for any changed block
             if block_changes and new_ir and reg_name in new_ir.registers:
