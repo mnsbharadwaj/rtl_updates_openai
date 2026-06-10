@@ -87,6 +87,9 @@ class PatcherConfig:
     force_no_llm:      bool = False  # True = skip LLM prompt, use template mode silently
     # v3.2 — flexible LLD mapping (no 1-to-1 naming required)
     lld_all_files:     bool = False  # True = apply every SFR change to ALL .h files in lld_dir
+    # v3.3 — semantic description equivalence gate
+    semantic_similarity_threshold_low:  float = 0.75  # below → auto-patch (skip check)
+    semantic_similarity_threshold_high: float = 0.85  # above → auto-skip (mark equivalent)
 
 
 @dataclass
@@ -238,6 +241,9 @@ def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
         pr_title_prefix = _str("pr_title_prefix", "feat(lld): SFR auto-patch"),
         # Pass raw llm: block for make_llm_client()
         llm             = dict(data.get("llm") or {}),
+        # v3.3 — semantic description equivalence gate
+        semantic_similarity_threshold_low  = float(data.get("semantic_similarity_threshold_low",  0.75)),
+        semantic_similarity_threshold_high = float(data.get("semantic_similarity_threshold_high", 0.85)),
     )
 
 
@@ -298,6 +304,8 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         compile_check = bool(data.get("compile_check", True)),
         force_no_llm  = bool(data.get("force_no_llm",  False)),
         lld_all_files = bool(data.get("lld_all_files", False)),
+        semantic_similarity_threshold_low  = float(data.get("semantic_similarity_threshold_low",  0.75)),
+        semantic_similarity_threshold_high = float(data.get("semantic_similarity_threshold_high", 0.85)),
     )
 
 

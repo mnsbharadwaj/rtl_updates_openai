@@ -158,11 +158,12 @@ class FieldIR:
 @dataclass
 class RegisterIR:
     """IR for a hardware register."""
-    name:        str
-    offset:      int        # byte offset
-    desc:        str
-    fields:      Dict[str, FieldIR] = field(default_factory=dict)
-    ip:          str = ""
+    name:             str
+    offset:           int        # byte offset
+    desc:             str
+    fields:           Dict[str, FieldIR] = field(default_factory=dict)
+    ip:               str = ""
+    struct_field_name: str = ""  # IP-level struct member name (e.g. stPCIE_LINK)
 
     @property
     def word_index(self) -> int:
@@ -190,15 +191,16 @@ class SfrIR:
 # ---------------------------------------------------------------------------
 @dataclass
 class ChangeRecord:
-    change_type: str
-    reg_name:    str
-    field_name:  Optional[str] = None
-    old_field:   Optional[FieldIR] = None
-    new_field:   Optional[FieldIR] = None
-    old_reg:     Optional[RegisterIR] = None
-    new_reg:     Optional[RegisterIR] = None
-    needs_llm:   bool = False
-    details:     List[str] = field(default_factory=list)
+    change_type:        str
+    reg_name:           str
+    field_name:         Optional[str] = None
+    old_field:          Optional[FieldIR] = None
+    new_field:          Optional[FieldIR] = None
+    old_reg:            Optional[RegisterIR] = None
+    new_reg:            Optional[RegisterIR] = None
+    needs_llm:          bool = False
+    details:            List[str] = field(default_factory=list)
+    semantic_equivalent: bool = False  # True if desc change is cosmetic (same meaning)
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (for --classify-out)."""
@@ -219,15 +221,16 @@ class ChangeRecord:
             return {"name": r.name, "offset": r.offset, "desc": r.desc, "sha16": r.sha16}
 
         return {
-            "change_type": self.change_type,
-            "reg_name":    self.reg_name,
-            "field_name":  self.field_name,
-            "old_field":   _field_dict(self.old_field),
-            "new_field":   _field_dict(self.new_field),
-            "old_reg":     _reg_dict(self.old_reg),
-            "new_reg":     _reg_dict(self.new_reg),
-            "needs_llm":   self.needs_llm,
-            "details":     self.details,
+            "change_type":        self.change_type,
+            "reg_name":           self.reg_name,
+            "field_name":         self.field_name,
+            "old_field":          _field_dict(self.old_field),
+            "new_field":          _field_dict(self.new_field),
+            "old_reg":            _reg_dict(self.old_reg),
+            "new_reg":            _reg_dict(self.new_reg),
+            "needs_llm":          self.needs_llm,
+            "details":            self.details,
+            "semantic_equivalent": self.semantic_equivalent,
         }
 
 # ---------------------------------------------------------------------------
@@ -268,6 +271,36 @@ _FIELD_COMMENT_RE = re.compile(
     r"\[\s*([A-Za-z0-9]+)\s*\]"
     r"\s*(.*)"
 )
+
+# ── Regex patterns for native (non-volatile) union bitfield format ──────────
+# typedef union _sfr_pcie_u  (no 'volatile', lowercase uint32)
+_NATIVE_UNION_TYPEDEF_RE = re.compile(
+    r"typedef\s+union\s+(\w+)"
+)
+# } SFR_PCIELINK_WRP, *pSFR_PCIELINK_WRP;   (same end pattern as volatile)
+_NATIVE_UNION_END_RE = _UNION_END_RE  # shared — same closing brace syntax
+# uint32 nvalue _value(0x111000);           (lowercase _value)
+_NATIVE_RESET_RE = re.compile(
+    r"_value\s*\(\s*(0x[0-9A-Fa-f]+|\d+)\s*\)"
+)
+# uint32 field_name : N;  // lsb-msb [ACCESS] description
+_NATIVE_FIELD_RE = re.compile(
+    r"(?<!volatile\s)\b(?:uint32|uint32_t|UINT32|u32)\s+(\w+)\s*:\s*(\d+)\s*;"
+    r"(?:\s*//\s*(.*))?"
+)
+# // Base address: 0x1000
+_NATIVE_BASE_ADDR_RE = re.compile(
+    r"//\s*[Bb]ase\s+[Aa]ddress\s*:\s*(0x[0-9A-Fa-f]+|\d+)"
+)
+# typedef struct _SFR_PCIELINK_WRP_RW_S
+_NATIVE_IP_STRUCT_RE = re.compile(
+    r"typedef\s+struct\s+(\w+)"
+)
+# SFR_PCIELINK_WRP_CTRL_0 stCTRL_LT0;  inside IP struct
+_NATIVE_IP_FIELD_RE = re.compile(
+    r"^\s*(\w+)\s+(\w+)\s*;"
+)
+
 # Access alias map  (union files sometimes use RW1S, RW1C etc.)
 _ACCESS_MAP = {
     "RW":   "RW",  "RO":   "RO",  "WO":   "WO",
@@ -325,16 +358,77 @@ def _ip_from_filename(path: str | Path) -> str:
 
 def _detect_sfr_format(text: str) -> str:
     """
-    Return 'union' if the file uses typedef volatile union bitfields,
-    otherwise return 'define' for the #define MASK/SHIFT format.
+    Return the SFR file format string.
+
+    Priority order:
+      'volatile_union' — typedef volatile union (Samsung PMU style)
+      'native_union'   — typedef union without volatile (PCIE/native style)
+      'define'         — #define MASK/SHIFT (legacy)
     """
     if _UNION_TYPEDEF_RE.search(text):
-        return "union"
+        return "volatile_union"
+    if _NATIVE_UNION_TYPEDEF_RE.search(text):
+        return "native_union"
     return "define"
 
 
 
-class UnionSfrParser:
+# ---------------------------------------------------------------------------
+# Abstract base class for union-style SFR parsers
+# ---------------------------------------------------------------------------
+from abc import ABC, abstractmethod
+
+
+class BaseSfrUnionParser(ABC):
+    """
+    Abstract base class for typedef-union SFR header parsers.
+
+    Concrete subclasses:
+        VolatileUnionSfrParser — typedef volatile union + UINT32 + _VALUE_()
+        NativeUnionSfrParser   — typedef union + uint32 + _value()
+    """
+
+    def __init__(self, ip: str = ""):
+        self.ip = ip.upper()
+
+    def parse_file(self, path: str | Path) -> SfrIR:
+        if not self.ip:
+            self.ip = _ip_from_filename(path)
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+        return self.parse_text(text, source=str(path))
+
+    @abstractmethod
+    def parse_text(self, text: str, source: str = "<string>") -> SfrIR: ...
+
+    def _extract_reg_name(self, typedef_name: str) -> str:
+        """
+        SFR_PMU_PMU_CON  → PMU_CON   (strip SFR_ then IP prefix)
+        SFR_PMU_SWT_CON  → SWT_CON
+        """
+        name = typedef_name.upper()
+        if name.startswith("SFR_"):
+            name = name[4:]
+        prefix = self.ip + "_"
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+        return name
+
+    @staticmethod
+    def _is_reserved(fname: str) -> bool:
+        """Return True if the field name is a reserved/padding placeholder."""
+        fu = fname.upper()
+        return (
+            fu.startswith("RSVD") or
+            fu.startswith("RESERVED") or
+            fu == "RSVDB" or
+            fu.startswith("RSVDN")
+        )
+
+
+# ---------------------------------------------------------------------------
+# VolatileUnionSfrParser  (formerly UnionSfrParser)
+# ---------------------------------------------------------------------------
+class VolatileUnionSfrParser(BaseSfrUnionParser):
     """
     Parses Samsung-style typedef volatile union bitfield SFR headers.
 
@@ -362,15 +456,6 @@ class UnionSfrParser:
         - Shift/mask : accumulated bit position as fields are walked in order
         - Access/desc: parsed from trailing // lsb-msb [ACCESS] description comment
     """
-
-    def __init__(self, ip: str = ""):
-        self.ip = ip.upper()
-
-    def parse_file(self, path: str | Path) -> SfrIR:
-        if not self.ip:
-            self.ip = _ip_from_filename(path)
-        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
-        return self.parse_text(text, source=str(path))
 
     def parse_text(self, text: str, source: str = "<string>") -> SfrIR:
         ir = SfrIR(ip=self.ip, source=source)
@@ -503,34 +588,233 @@ class UnionSfrParser:
 
         return ir
 
-    def _extract_reg_name(self, typedef_name: str) -> str:
-        """
-        SFR_PMU_PMU_CON  → PMU_CON   (strip SFR_ then IP prefix)
-        SFR_PMU_SWT_CON  → SWT_CON
-        """
-        name = typedef_name.upper()
-        # Strip SFR_ prefix
-        if name.startswith("SFR_"):
-            name = name[4:]
-        # Strip IP prefix (e.g. PMU_)
-        prefix = self.ip + "_"
-        if name.startswith(prefix):
-            name = name[len(prefix):]
-        return name
+# ---------------------------------------------------------------------------
+# NativeUnionSfrParser  (new — plain typedef union, lowercase uint32)
+# ---------------------------------------------------------------------------
+class NativeUnionSfrParser(BaseSfrUnionParser):
+    """
+    Parses plain (non-volatile) typedef union SFR headers with _value() reset.
 
+    Format example (sfr_pcielink.h)::
+
+        typedef union _sfr_pcie_u
+        {
+            uint32 nvalue _value(0x111000);  // reset value for all fields
+            struct
+            {
+                uint32 xxx    : 24; // 0-23  [RW]  limit address
+                uint32 yyy    :  1; // 24-24 [RW]  1: Enable detour logic
+                uint32 RSVDN1 :  3; // 25-27 [RO]  reserved
+                uint32 zzz    :  1; // 28-28 [RW]  1: enable
+            } stNative;
+        } SFR_PCIELINK_WRP, *pSFR_PCIELINK_WRP;
+
+        // Base address: 0x1000
+        typedef struct _SFR_PCIELINK_WRP_RW_S
+        {
+            SFR_PCIELINK_WRP_CTRL_0 stCTRL_LT0;
+            SFR_PCIELINK_WRP_CTRL_0 stCTRL_LT1;
+            SFR_PCIELINK_WRP        stPCIE_LINK;
+        } SFR_PCIELINK_WRP_RW, *pSFR_PCIELINK_WRP_RW;
+
+    Two-pass strategy:
+        Pass 1 — collect all typedef union blocks → {typedef_name: RegisterIR}
+        Pass 2 — find IP-level struct, parse base address, assign offsets
+    """
+
+    def parse_text(self, text: str, source: str = "<string>") -> SfrIR:
+        ir = SfrIR(ip=self.ip, source=source)
+        lines = text.splitlines()
+
+        # ── Pass 1: collect all union register blocks ─────────────────────
+        # Maps typedef_name (uppercase) → RegisterIR with offset=0 (placeholder)
+        union_map: Dict[str, RegisterIR] = {}  # typedef_name → RegisterIR
+
+        in_union    = False
+        in_struct   = False
+        brace_depth = 0
+        current_reg: Optional[RegisterIR] = None
+        bit_pos     = 0
+        reset_val   = 0
+
+        for ln in lines:
+            # Start of a native union typedef
+            m = _NATIVE_UNION_TYPEDEF_RE.search(ln)
+            if m and not in_union and "volatile" not in ln:
+                in_union    = True
+                in_struct   = False
+                brace_depth = 0
+                bit_pos     = 0
+                reset_val   = 0
+                current_reg = RegisterIR(
+                    name="__PENDING__",
+                    offset=0,
+                    desc="",
+                    ip=self.ip,
+                )
+                continue
+
+            if not in_union:
+                continue
+
+            brace_depth += ln.count("{") - ln.count("}")
+
+            # Reset value from _value(...)
+            mv = _NATIVE_RESET_RE.search(ln)
+            if mv:
+                try:
+                    reset_val = _parse_int(mv.group(1))
+                except ValueError:
+                    pass
+
+            # Entry into inner struct
+            stripped = ln.strip()
+            if stripped.startswith("struct"):
+                in_struct = True
+                continue
+            if stripped == "{" and not in_struct and brace_depth == 2:
+                in_struct = True
+                continue
+
+            # Parse bitfield members inside struct
+            if in_struct and current_reg is not None:
+                mf = _NATIVE_FIELD_RE.search(ln)
+                if mf:
+                    fname   = mf.group(1)
+                    width   = int(mf.group(2))
+                    comment = (mf.group(3) or "").strip()
+
+                    mc = _FIELD_COMMENT_RE.search(comment)
+                    if mc:
+                        lsb_c      = int(mc.group(1))
+                        msb_c      = int(mc.group(2))
+                        access_raw = mc.group(3).upper()
+                        desc       = mc.group(4).strip()
+                        access     = _ACCESS_MAP.get(access_raw, "RW")
+                        shift      = lsb_c
+                        msb        = msb_c
+                        lsb        = lsb_c
+                    else:
+                        shift  = bit_pos
+                        lsb    = bit_pos
+                        msb    = bit_pos + width - 1
+                        access = "RW"
+                        desc   = comment
+
+                    mask = ((1 << width) - 1) << shift
+
+                    if not self._is_reserved(fname):
+                        f_ir = FieldIR(
+                            name=fname, reg_name=current_reg.name,
+                            mask=mask, shift=shift,
+                            msb=msb, lsb=lsb,
+                            access=access,
+                            reset=(reset_val >> shift) & ((1 << width) - 1),
+                            desc=desc, ip=self.ip,
+                        )
+                        current_reg.fields[fname] = f_ir
+
+                    bit_pos += width
+
+            # Closing typedef line: } SFR_PCIELINK_WRP, *pSFR...;
+            me = _NATIVE_UNION_END_RE.search(ln)
+            if me and in_union:
+                typedef_name = me.group(1)
+                reg_name     = self._extract_reg_name(typedef_name)
+                if current_reg is not None and reg_name:
+                    current_reg.name = reg_name
+                    for f in current_reg.fields.values():
+                        f.reg_name = reg_name
+                    union_map[typedef_name.upper()] = current_reg
+
+                in_union    = False
+                in_struct   = False
+                current_reg = None
+
+        # ── Pass 2: parse IP-level struct → assign base address + offsets ──
+        base_addr    = 0
+        in_ip_struct = False
+        brace_depth  = 0
+        member_index = 0
+
+        for i, ln in enumerate(lines):
+            # Look for base address comment immediately before the struct
+            mb = _NATIVE_BASE_ADDR_RE.search(ln)
+            if mb:
+                try:
+                    base_addr = _parse_int(mb.group(1))
+                except ValueError:
+                    pass
+
+            # Start of IP-level struct (typedef struct _SFR_..._S)
+            ms = _NATIVE_IP_STRUCT_RE.search(ln)
+            if ms and not in_ip_struct:
+                struct_name = ms.group(1).upper()
+                # Only accept structs that look like IP-level grouping
+                # (contains _S or _RW_S suffix, or is just a single-level struct)
+                if struct_name.endswith("_S") or struct_name.endswith("_RW_S") or \
+                   struct_name.endswith("_RO_S") or "WRP" in struct_name or "RW" in struct_name:
+                    in_ip_struct = True
+                    brace_depth  = 0
+                    member_index = 0
+                    continue
+
+            if not in_ip_struct:
+                continue
+
+            brace_depth += ln.count("{") - ln.count("}")
+            if brace_depth <= 0 and in_ip_struct:
+                in_ip_struct = False
+                continue
+
+            # Parse struct member: SFR_TYPE stFieldName;
+            mf2 = _NATIVE_IP_FIELD_RE.match(ln)
+            if mf2 and brace_depth == 1:
+                type_name   = mf2.group(1).upper()
+                member_name = mf2.group(2)
+
+                # Find matching union in union_map (by type name)
+                reg = union_map.get(type_name)
+                if reg is None:
+                    # Try partial match: type_name might be the typedef (not the struct)
+                    for k, v in union_map.items():
+                        if type_name == k or type_name.startswith(k[:max(4, len(k)-2)]):
+                            reg = v
+                            break
+
+                if reg is not None:
+                    reg.offset           = base_addr + member_index * 4
+                    reg.struct_field_name = member_name
+                    ir.registers[reg.name] = reg
+                    member_index += 1
+
+        # Registers with no IP struct entry: add with sequential offsets after base
+        fallback_offset = base_addr + member_index * 4
+        for typedef_name, reg in union_map.items():
+            if reg.name not in ir.registers:
+                reg.offset = fallback_offset
+                ir.registers[reg.name] = reg
+                fallback_offset += 4
+
+        return ir
+
+
+# Backward-compatible alias — existing code that imports UnionSfrParser still works
+UnionSfrParser = VolatileUnionSfrParser
 
 
 class SfrParser:
     """
     Unified SFR header parser — auto-detects file format.
 
-    Supports two formats:
+    Supports three formats:
         1. ``#define`` MASK/SHIFT format  (legacy / synthesised headers)
         2. ``typedef volatile union`` bitfield format  (Samsung sfr_pmu.h style)
+        3. ``typedef union`` plain bitfield format     (PCIE/native sfr_pcie.h style)
 
     The IP name is **auto-detected from the filename** when not supplied:
-        sfr_pmu.h  → ip = PMU
-        sfr_uart.h → ip = UART
+        sfr_pmu.h      → ip = PMU
+        sfr_pcielink.h → ip = PCIELINK
 
     ``--ip`` is therefore **optional** on the CLI.
     """
@@ -543,12 +827,21 @@ class SfrParser:
             self.ip = _ip_from_filename(path)
         text = Path(path).read_text(encoding="utf-8", errors="replace")
         fmt  = _detect_sfr_format(text)
-        if fmt == "union":
-            return UnionSfrParser(ip=self.ip).parse_text(text, source=str(path))
+        if fmt == "volatile_union":
+            return VolatileUnionSfrParser(ip=self.ip).parse_text(text, source=str(path))
+        if fmt == "native_union":
+            return NativeUnionSfrParser(ip=self.ip).parse_text(text, source=str(path))
         return self.parse_text(text, source=str(path))
 
 
     def parse_text(self, text: str, source: str = "<string>") -> SfrIR:
+        # Auto-detect format and delegate to the right sub-parser
+        fmt = _detect_sfr_format(text)
+        if fmt == "volatile_union":
+            return VolatileUnionSfrParser(ip=self.ip).parse_text(text, source=source)
+        if fmt == "native_union":
+            return NativeUnionSfrParser(ip=self.ip).parse_text(text, source=source)
+        # Legacy #define MASK/SHIFT parser
         ir = SfrIR(ip=self.ip, source=source)
         lines = text.splitlines()
 

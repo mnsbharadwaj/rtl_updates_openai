@@ -64,6 +64,7 @@ CONFIG FILE:  lld_patcher.yaml
 from __future__ import annotations
 
 import logging
+from lld_gen.encoding_utils import configure_logging_encoding, ensure_utf8_streams
 import re
 import shutil
 import time
@@ -78,6 +79,7 @@ from lld_gen.config import (
 from lld_gen.sfr_diff_analyzer import (
     classify_sfr_diff, summarize_changes, SfrParser, ChangeType, ChangeRecord,
 )
+from lld_gen.semantic_check import apply_semantic_gate, SEMANTIC_CHECK_TYPES
 from lld_gen.lld_patcher import LLDPatcher
 from lld_gen.llm_client import LLMClient, load_llm_config
 from lld_gen.compile_check import run_compile_check, _find_gcc, GccNotFoundError
@@ -481,6 +483,22 @@ class BatchRunner:
             all_changes = classify_sfr_diff(job.old_sfr, job.new_sfr, ip=job.ip)
             result.n_changes = len(all_changes)
 
+            # ── Semantic description equivalence gate ───────────────────────
+            _llm_for_gate = _make_llm(self.cfg, overrides, no_llm)
+            sem_low  = getattr(self.cfg, "semantic_similarity_threshold_low",  0.75)
+            sem_high = getattr(self.cfg, "semantic_similarity_threshold_high", 0.85)
+            n_sem_before = sum(1 for cr in all_changes if cr.needs_llm)
+            apply_semantic_gate(
+                changes        = all_changes,
+                llm_client     = _llm_for_gate,
+                threshold_low  = sem_low,
+                threshold_high = sem_high,
+            )
+            n_sem_skip = n_sem_before - sum(1 for cr in all_changes if cr.needs_llm)
+            if n_sem_skip:
+                _info(f"Semantic gate: {n_sem_skip} description change(s) found "
+                      "cosmetically equivalent — LLM patching skipped for those")
+
             if not all_changes:
                 _ok("No changes detected — files are identical")
                 _step_done("SKIP — nothing to patch")
@@ -827,6 +845,8 @@ def main() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
+    ensure_utf8_streams()        # make stdout/stderr utf-8 safe
+    configure_logging_encoding()  # make log handlers utf-8 safe
 
     results = run_from_config(args.config, verbose=args.verbose)
 

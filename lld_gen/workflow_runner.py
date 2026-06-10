@@ -79,6 +79,7 @@ CONFIG FILE:  workflow_config.yaml
 from __future__ import annotations
 
 import logging
+from lld_gen.encoding_utils import configure_logging_encoding, ensure_utf8_streams
 
 import shutil
 import tempfile
@@ -96,6 +97,7 @@ from lld_gen.llm_client import LLMClient, make_llm_client
 from lld_gen.compile_check import run_compile_check, run_compile_check_one_fn
 from lld_gen.pr_stage import stage_pr, build_pr_description
 from lld_gen.lld_cross_ref import find_cross_refs, format_cross_ref_report
+from lld_gen.semantic_check import apply_semantic_gate, SEMANTIC_CHECK_TYPES
 # Reuse verbose helpers from batch_runner (same callback, same method lookup)
 from lld_gen.batch_runner import _print_before_after, _change_method
 
@@ -339,6 +341,25 @@ class WorkflowRunner:
         logger.info(f"  [D] Diff: {old_sfr.name} vs {new_sfr.name} ...")
         changes = classify_sfr_diff(old_sfr, new_sfr, ip=ip)
         result.n_changes = len(changes)
+
+        # ── D2: Semantic description equivalence gate ─────────────────────
+        sem_low  = getattr(cfg, "semantic_similarity_threshold_low",  0.75)
+        sem_high = getattr(cfg, "semantic_similarity_threshold_high", 0.85)
+        n_before = sum(1 for cr in changes if cr.needs_llm)
+        apply_semantic_gate(
+            changes        = changes,
+            llm_client     = llm_client,
+            threshold_low  = sem_low,
+            threshold_high = sem_high,
+        )
+        n_skipped = n_before - sum(1 for cr in changes if cr.needs_llm)
+        if n_skipped:
+            logger.info(
+                "  [D2] Semantic gate: %d description change(s) found cosmetically "
+                "equivalent — LLM patching skipped for those.",
+                n_skipped,
+            )
+
         result.change_summary = summarize_changes(changes)
         logger.info(f"  [D] {result.change_summary.splitlines()[1]}")
 
@@ -885,6 +906,8 @@ def main() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
+    ensure_utf8_streams()        # utf-8 safe stdout/stderr
+    configure_logging_encoding()  # utf-8 safe log handlers
 
     result = run_workflow(args.config, verbose=args.verbose)
     if not result.all_ok:

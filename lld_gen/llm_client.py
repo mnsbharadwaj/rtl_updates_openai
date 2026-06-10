@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from lld_gen.encoding_utils import sanitise_llm_output, safe_open  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,79 @@ Old function text (for context/reference — rewrite using struct-based access):
 {old_code}
 
 Generate the updated C static inline function(s) — struct-based, no masks, no shifts.
+"""
+
+# ---------------------------------------------------------------------------
+# LLD Patch Prompts  (used by LLMClient.patch_lld_function)
+# ---------------------------------------------------------------------------
+_LLD_PATCH_SYSTEM = """\
+You are an expert embedded-systems firmware engineer specialising in PCIe and CXL \
+hardware abstraction layer (HAL) code written in C.
+
+Your task is to update ONLY the specific LLD (Low-Level Driver) C function(s) provided \
+below so that behaviour, contracts, and documentation correctly reflect an SFR field \
+description change.
+
+STRICT SCOPE RULES:
+- Output ONLY the function(s) provided in the 'Existing LLD Function(s) to Patch' section.
+- Do NOT output functions for any other field, register, or IP block.
+- Do NOT add new functions that were not in the input.
+- If only a getter is provided, output only the getter. If getter+setter, output both.
+
+DOCUMENTATION RULES:
+1. BOTH getter and setter must have a /** @brief ... */ comment.
+   Getter @brief: 'Get <concise field description, max 10 words>.'
+   Setter @brief: 'Set <concise field description, max 10 words>.'
+   Keep @brief SHORT. Move detailed explanation into inline body comments, NOT @brief.
+2. Preserve the function signature (name, return type, parameter types) EXACTLY.
+3. Keep the struct access path (lld->pSFR->stREG.stNative.field) unchanged unless
+   the field was explicitly renamed.
+
+CODE BODY RULES:
+4. If the new description mentions a SPECIAL VALUE (e.g. '0 = disabled', 'max = N'),
+   add a short inline comment in the setter body reflecting that constraint.
+   Example: lld->pSFR->... = val; /* 0 = disable retraining; valid: 0-15 */
+5. If the new description implies a VALID RANGE or constraint, note it in a comment.
+6. If the new description reveals POLARITY CHANGE (active-low, inverted logic),
+   invert the value in the setter body and add an explanatory comment.
+7. If the new description changes FIELD WIDTH or ENCODING, update the cast and add a note.
+8. For COMMENT_CHANGED with no logic change, the body stays identical EXCEPT for
+   adding an inline comment if the description reveals special values or constraints.
+
+RETURN: Only the updated C function(s) - no preamble, no prose, no markdown fences.
+"""
+
+_LLD_PATCH_USER_TMPL = """\
+=== SFR Change Summary ===
+IP            : {ip}
+Register      : {reg_name}
+Field         : {field_name}
+Change type   : {change_type}
+Register info : {reg_summary}
+
+SCOPE: Patch ONLY the {field_name} function(s) listed below.
+
+=== Old SFR Description (v1) ===
+{old_desc}
+
+=== New SFR Description (v2) ===
+{new_desc}
+
+=== Additional Context ===
+{extra}
+
+=== Existing LLD Function(s) to Patch ===
+```c
+{old_fn_text}
+```
+
+Task:
+1. Give BOTH getter and setter a short /** @brief ... */ (max 10 words each).
+2. If the new description mentions special values (e.g. 0=disabled), valid ranges,
+   or constraints, add a brief inline comment in the setter body (one line max).
+3. If there is a semantic change (polarity, encoding, width), update the body too.
+4. Keep signatures EXACTLY as given. Return ONLY the '{field_name}' function(s),
+   raw C, no markdown fences.
 """
 
 _TEST_SYSTEM_PROMPT = """\
@@ -275,10 +350,15 @@ def _cache_key(reg: str, field_name: str, change_type: str, desc: str) -> str:
 
 
 def _strip_fences(text: str) -> str:
-    """Remove markdown code fences that some models add despite instructions."""
+    """Remove markdown code fences that some models add despite instructions.
+
+    Also sanitises any non-ASCII Unicode from the LLM response so that the
+    result is always safe to write to cp1252 log handlers and narrow-encoding
+    file systems on Windows.
+    """
     text = re.sub(r"```(?:c|cpp|C)?\s*\n", "", text)
     text = re.sub(r"\n?```", "", text)
-    return text.strip()
+    return sanitise_llm_output(text.strip())
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -286,6 +366,56 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit - 20] + "\n...[truncated for context window]"
+
+
+def _filter_to_field_functions(
+    llm_output: str,
+    field_name: str,
+    fallback: str,
+) -> str:
+    """
+    Post-process the raw LLM output to extract ONLY the functions that are
+    relevant to ``field_name``.
+
+    Small models (e.g. qwen2.5-coder:1.5b) often ignore the SCOPE rule and
+    return the entire register block.  This helper:
+
+    1. Splits the output into individual ``static inline`` function blocks.
+    2. Keeps only blocks whose function name contains ``field_name`` as a
+       whole word (not a substring of another field name).
+    3. Falls back to the original ``fallback`` text if nothing matches.
+
+    Args:
+        llm_output:  Raw (fence-stripped) string from the LLM.
+        field_name:  The target field (e.g. ``"retrain_cnt"``).
+        fallback:    The original un-patched function text to use on failure.
+
+    Returns:
+        Filtered C function text containing only the target field's functions.
+    """
+    if not field_name or not llm_output.strip():
+        return fallback
+
+    import re as _re
+
+    # Split on static inline boundaries while keeping the boundary
+    # Pattern: split before each 'static inline' that is preceded by \n or start
+    fn_blocks = _re.split(r'(?=\bstatic\s+inline\b)', llm_output)
+
+    # A block belongs to field_name if the function name contains field_name
+    # as a whole word component: e.g. _retrain_cnt_ matches but not _cnt_ alone
+    # The LLD naming convention is: lld_{ip}_{reg}_{field}_{verb}
+    word_re = _re.compile(
+        r'\bstatic\s+inline\s+\S+\s+\w+' + _re.escape(field_name) + r'\w*\s*\(',
+        _re.IGNORECASE,
+    )
+    kept = [b for b in fn_blocks if b.strip() and word_re.search(b)]
+
+    if kept:
+        return "\n\n".join(b.strip() for b in kept)
+
+    # Nothing matched — return fallback so we don't silently lose the function
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +910,90 @@ class LLMClient:
         except Exception as exc:
             logger.warning("[LLM-TEST] Failed: %s -- using template", exc)
             return ""
+
+    # ── Public: patch an LLD function based on SFR description change ─────────
+    def patch_lld_function(
+        self,
+        ip:            str,
+        reg_name:      str,
+        field_name:    str,
+        change_type:   str,
+        old_desc:      str,
+        new_desc:      str,
+        old_fn_text:   str,
+        reg_ir_summary: str = "",
+        extra_context: str = "",
+    ) -> str:
+        """
+        Ask the LLM to patch one or more LLD C functions in response to an SFR
+        description/behaviour change.
+
+        Args:
+            ip:             IP name  (e.g. "PCIELINK")
+            reg_name:       Register name  (e.g. "CTRL_LT0")
+            field_name:     Field name  (e.g. "retrain_cnt")
+            change_type:    ChangeType string  (e.g. "COMMENT_CHANGED")
+            old_desc:       Original field description from v1 SFR
+            new_desc:       Updated field description from v2 SFR
+            old_fn_text:    The existing LLD C function(s) for this field
+            reg_ir_summary: Optional IR summary (offset, access, bit range)
+            extra_context:  Any additional context (e.g. other changed fields)
+
+        Returns:
+            Patched C function text.  Returns old_fn_text unchanged on failure.
+        """
+        if not self.available:
+            logger.warning("[LLM-PATCH] LLM unavailable -- returning unchanged for %s.%s",
+                           reg_name, field_name)
+            return old_fn_text
+
+        cache_key = _cache_key(
+            reg_name, field_name,
+            f"PATCH_{change_type}",
+            f"{old_desc[:80]}|||{new_desc[:80]}",
+        )
+        cached = self._from_cache(cache_key)
+        if cached is not None:
+            logger.debug("[LLM-PATCH] Cache hit: %s.%s", reg_name, field_name)
+            return cached
+
+        system = _LLD_PATCH_SYSTEM
+        user   = _LLD_PATCH_USER_TMPL.format(
+            ip          = ip,
+            reg_name    = reg_name,
+            field_name  = field_name,
+            change_type = change_type,
+            old_desc    = old_desc.strip(),
+            new_desc    = new_desc.strip(),
+            reg_summary = reg_ir_summary or f"Register: {reg_name}, Field: {field_name}",
+            old_fn_text = old_fn_text.strip(),
+            extra       = extra_context.strip() if extra_context else "(none)",
+        )
+
+        logger.info(
+            "[LLM-PATCH-%s] Patching %s.%s  (%s) ...",
+            self.cfg.backend.upper(), reg_name, field_name, change_type,
+        )
+        try:
+            raw    = self._call(system, user, self.cfg.max_tokens)
+            result = _strip_fences(raw)
+            # Post-process: keep only functions that contain the target field name.
+            # Small models (1.5b) sometimes return the whole register block;
+            # we extract only the relevant function(s) to stay in scope.
+            result = _filter_to_field_functions(result, field_name, old_fn_text)
+            if result:
+                self._to_cache(cache_key, result)
+                logger.info("[LLM-PATCH] %s.%s -> patched (%d chars)",
+                            reg_name, field_name, len(result))
+            else:
+                logger.warning("[LLM-PATCH] LLM returned empty -- using original for %s.%s",
+                               reg_name, field_name)
+                result = old_fn_text
+            return result
+        except Exception as exc:
+            logger.warning("[LLM-PATCH] Failed (%s) -- returning unchanged for %s.%s",
+                           exc, reg_name, field_name)
+            return old_fn_text
 
 
 # ---------------------------------------------------------------------------
