@@ -153,10 +153,12 @@ def _vlog(msg: str) -> None:
 
 def _change_method(change_type: str, used_llm: bool) -> str:
     """Human-readable description of how a change will be applied."""
-    # Categories that always use the template (deterministic AST patch)
+    # Categories that use deterministic AST patch — NO LLM needed
     template_only = {
         ChangeType.REG_RENAMED, ChangeType.FIELD_RENAMED,
-        ChangeType.FIELD_DELETED, ChangeType.FIELD_ADDED,
+        ChangeType.FIELD_DELETED,
+        # NOTE: FIELD_ADDED is intentionally NOT here — it requires
+        # generate_new_lld_function() via LLM when generate_new_functions=True
         ChangeType.BITWIDTH_CHANGED, ChangeType.ACCESS_CHANGED,
         ChangeType.OFFSET_CHANGED, ChangeType.RESET_CHANGED,
         ChangeType.REG_MOVED, ChangeType.REG_SIZE_CHANGED,
@@ -171,6 +173,8 @@ def _change_method(change_type: str, used_llm: bool) -> str:
         ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED,
         ChangeType.FIELD_POLARITY_CHANGED, ChangeType.DESCRIPTION_ADDED,
         ChangeType.FIELD_ENUM_CHANGED,
+        # FIELD_ADDED: LLM generates NEW getter/setter from scratch
+        ChangeType.FIELD_ADDED,
     }
     # Categories that are manual review
     manual = {
@@ -183,6 +187,8 @@ def _change_method(change_type: str, used_llm: bool) -> str:
     if change_type in template_only:
         return "template (deterministic AST patch)"
     if change_type in llm_preferred:
+        if change_type == ChangeType.FIELD_ADDED:
+            return "LLM new-fn generation" if used_llm else "SKIPPED (no LLM — set generate_new_functions: true)"
         return "LLM (cloud gpt-oss)" if used_llm else "template fallback (LLM unavailable/skipped)"
     return "LLM / template" if used_llm else "template"
 
@@ -275,8 +281,14 @@ def _lld_files_for_changes(
     referencing the changed register/fields. No filename matching needed.
 
     Search strategy per ChangeRecord:
-      • Function prefix:  lld_{ip}_{reg}_   (e.g. lld_pmu_clk_con_)
-      • Struct member:    st{REG}            (e.g. stCLK_CON)
+      • Existing fields  — match by function prefix: lld_{ip}_{reg}_
+      • FIELD_ADDED      — match by struct member only: st{REG}
+                           (no function exists yet, but the register struct IS
+                            in the file — new fn will be appended after the block)
+
+    FIX: Previously FIELD_ADDED was only matched by fn_prefix which never
+    exists, so new fields were silently skipped. Now struct_ref alone is
+    sufficient to include the file for new-function generation.
     """
     if not lld_dir.exists() or not changes:
         return {}
@@ -298,15 +310,25 @@ def _lld_files_for_changes(
         for cr in changes:
             fn_prefix  = f"lld_{ip_lo}_{cr.reg_name.lower()}_"
             struct_ref = f"st{cr.reg_name}"
-            if fn_prefix in text or struct_ref in text:
+            if cr.change_type == ChangeType.FIELD_ADDED:
+                # New field: no function exists yet — match by register struct
+                # presence only; new function will be appended to the block
+                if struct_ref in text:
+                    hits.append(cr)
+                    logger.debug("  │       + FIELD_ADDED %s.%s matched via struct %s",
+                                 cr.reg_name, cr.field_name, struct_ref)
+            elif fn_prefix in text or struct_ref in text:
                 hits.append(cr)
 
         if hits:
-            regs = sorted({cr.reg_name for cr in hits})
+            regs      = sorted({cr.reg_name for cr in hits})
+            new_flds  = [cr.field_name for cr in hits
+                         if cr.change_type == ChangeType.FIELD_ADDED]
             result[h_file] = hits
             logger.info(
-                "  │     ✔ %-30s  matches registers: %s",
+                "  │     ✔ %-30s  registers: %s%s",
                 h_file.name, ", ".join(regs),
+                ("  [+new: %s]" % ", ".join(new_flds)) if new_flds else "",
             )
         else:
             logger.debug("  │       ✗ %-28s  no matching functions", h_file.name)

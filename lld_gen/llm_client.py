@@ -133,13 +133,19 @@ RETURN: Only the updated C function(s) - no preamble, no prose, no markdown fenc
 
 _LLD_PATCH_USER_TMPL = """\
 === SFR Change Summary ===
-IP            : {ip}
-Register      : {reg_name}
-Field         : {field_name}
-Change type   : {change_type}
-Register info : {reg_summary}
+IP          : {ip}
+Register    : {reg_name}
+Field       : {field_name}
+Change type : {change_type}
+
+=== Register / Field IR ===
+{reg_summary}
 
 SCOPE: Patch ONLY the {field_name} function(s) listed below.
+The C bitfield access for this field is: {bitfield_path}
+
+=== What Changed (v1 -> v2) ===
+{extra}
 
 === Old SFR Description (v1) ===
 {old_desc}
@@ -147,21 +153,70 @@ SCOPE: Patch ONLY the {field_name} function(s) listed below.
 === New SFR Description (v2) ===
 {new_desc}
 
-=== Additional Context ===
-{extra}
-
 === Existing LLD Function(s) to Patch ===
 ```c
 {old_fn_text}
 ```
 
 Task:
-1. Give BOTH getter and setter a short /** @brief ... */ (max 10 words each).
-2. If the new description mentions special values (e.g. 0=disabled), valid ranges,
-   or constraints, add a brief inline comment in the setter body (one line max).
-3. If there is a semantic change (polarity, encoding, width), update the body too.
-4. Keep signatures EXACTLY as given. Return ONLY the '{field_name}' function(s),
-   raw C, no markdown fences.
+1. Give BOTH getter and setter a concise /** @brief ... */ (max 10 words each).
+2. The bitfield access path is: {bitfield_path}
+   Do NOT change this path unless the field was explicitly renamed above.
+3. If the new description mentions special values (e.g. 0=disabled, max=N),
+   add a short inline comment in the setter body on the same line as the write.
+4. If there is a semantic change (polarity, encoding, range, width), update the
+   setter body to reflect it with comments.
+5. Keep function signatures EXACTLY as given.
+Return ONLY the '{field_name}' function(s), raw C, no markdown fences.
+"""
+
+# ---------------------------------------------------------------------------
+# Prompt templates for NEW function generation (FIELD_ADDED)
+# ---------------------------------------------------------------------------
+_LLD_NEW_FN_SYSTEM = """\
+You are an expert embedded-systems firmware engineer for PCIe/CXL HAL code in C.
+
+Your task is to generate NEW static inline LLD functions for a hardware register
+field that was added in a new SFR revision. There are NO existing functions to patch.
+
+RULES (follow exactly -- do NOT deviate):
+- Use the EXACT function names given in the user prompt section 'Exact function names'.
+- Use the EXACT struct parameter type given in the user prompt.
+- Use the EXACT bitfield access path given in the user prompt.
+- Getter body:  return (<type>)(<bitfield_path>);
+- Setter body:  <bitfield_path> = val;
+- W1C clear:   <bitfield_path> = 1U;  /* W1C */
+- Add /** @brief <concise 10-word description> */ before each function.
+- If description mentions constraints or special values, add ONE inline comment.
+- NO #include, NO #define, NO markdown fences, NO raw bit masks or shifts.
+Return ONLY the raw C function(s), nothing else.
+"""
+
+_LLD_NEW_FN_USER_TMPL = """\
+=== New SFR Field: Generate LLD Functions ===
+IP          : {ip}
+Register    : {reg_name}  (C struct member: {struct_reg})
+Field       : {field_name}
+Access      : {access}
+Bits        : [{msb}:{lsb}]  Width: {width}-bit  Reset: 0x{reset:X}
+
+Exact function names to generate:
+{fn_list}
+
+Exact struct parameter type:
+  struct lld_{ip_lo} *lld
+
+Exact bitfield access path:
+  {bitfield_path}
+
+=== Field Description ===
+{desc}
+
+=== Task ===
+Generate {verbs} using EXACTLY the names above.
+- Getter return type : {return_type}
+- Setter param       : {return_type} val
+Return ONLY the raw C function(s), no markdown, no prose.
 """
 
 _TEST_SYSTEM_PROMPT = """\
@@ -231,6 +286,9 @@ class LLMConfig:
     max_retries:   int   = 3
     context_limit: int   = 4096            # chars; truncate prompt body if exceeded
     location:      str   = "local"          # local|cloud
+    # ── Debug / observability flags ──────────────────────────────────────────
+    debug_llm:           bool  = False  # print full prompt+response to stdout
+    generate_new_functions: bool = True  # auto-generate LLD fns for FIELD_ADDED
 
     # Default URLs per backend (can all be overridden via url:)
     _DEFAULT_URLS: Dict[str, str] = field(default_factory=lambda: {
@@ -313,17 +371,21 @@ def load_llm_config(data: dict) -> LLMConfig:
                 break
 
     cfg = LLMConfig(
-        backend       = llm_section.get("backend", ""),
-        model         = llm_section.get("model", ""),
-        url           = llm_section.get("url", ""),
-        api_key       = llm_section.get("api_key", ""),
-        api_version   = llm_section.get("api_version", "2024-02-01"),
-        temperature   = float(llm_section.get("temperature", 0.1)),
-        max_tokens    = int(llm_section.get("max_tokens", 600)),
-        timeout       = float(llm_section.get("timeout", 120.0)),
-        max_retries   = int(llm_section.get("max_retries", 3)),
-        context_limit = int(llm_section.get("context_limit", 4096)),
-        location      = location,
+        backend              = llm_section.get("backend", ""),
+        model                = llm_section.get("model", ""),
+        url                  = llm_section.get("url", ""),
+        api_key              = llm_section.get("api_key", ""),
+        api_version          = llm_section.get("api_version", "2024-02-01"),
+        temperature          = float(llm_section.get("temperature", 0.1)),
+        max_tokens           = int(llm_section.get("max_tokens", 600)),
+        timeout              = float(llm_section.get("timeout", 120.0)),
+        max_retries          = int(llm_section.get("max_retries", 3)),
+        context_limit        = int(llm_section.get("context_limit", 4096)),
+        location             = location,
+        debug_llm            = bool(llm_section.get("debug_llm",
+                                   data.get("debug_llm", False))),
+        generate_new_functions = bool(llm_section.get("generate_new_functions",
+                                     data.get("generate_new_functions", True))),
     )
 
     # ── Legacy flat field support ────────────────────────────────────────────
@@ -554,6 +616,51 @@ class LLMClient:
                     time.sleep(wait)
         raise RuntimeError(f"LLM call failed after {self.cfg.max_retries} retries: {last_exc}")
 
+    # ── Central _call() with debug_llm support ────────────────────────────────
+    def _call(self, system: str, user: str, max_tokens: int) -> str:
+        """
+        Dispatch to the resolved backend with optional debug output.
+
+        When ``debug_llm: true`` is set in config, prints to stdout:
+          - Full SYSTEM prompt
+          - Full USER prompt
+          - Raw LLM response
+          - Round-trip time
+
+        This lets engineers inspect exactly what the LLM receives and returns
+        without digging through logs.
+        """
+        if not self._backend_fn:
+            return ""
+
+        if self.cfg.debug_llm:
+            _W = 72
+            _bar = lambda c: c * _W
+            print()
+            print(_bar("="))
+            print(f"  [LLM DEBUG]  model={self.cfg.model}  backend={self.cfg.backend}")
+            print(_bar("="))
+            print("  --- SYSTEM PROMPT ---")
+            for ln in system.splitlines():
+                print(f"  | {ln}")
+            print("  --- USER PROMPT ---")
+            for ln in user.splitlines():
+                print(f"  | {ln}")
+            print(_bar("-"))
+
+        t0  = time.perf_counter()
+        raw = self._with_retry(self._backend_fn, system, user, max_tokens)
+        dt  = time.perf_counter() - t0
+
+        if self.cfg.debug_llm:
+            print(f"  --- LLM RESPONSE  ({dt:.2f}s) ---")
+            for ln in raw.splitlines():
+                print(f"  | {ln}")
+            print(_bar("="))
+            print()
+
+        return raw
+
     # ── Backend: Cloud Ollama ─────────────────────────────────────────────────
     def _call_cloud_ollama(self, system: str, user: str, max_tokens: int) -> str:
         url = "http://107.99.41.85/ollama/srv1/api/generate"
@@ -714,17 +821,12 @@ class LLMClient:
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
 
-    # ── Dispatch ──────────────────────────────────────────────────────────────
-    def _call(self, system: str, user: str, max_tokens: int) -> str:
-        if not self._backend_fn:
-            raise RuntimeError(
-                f"No LLM backend active. Configure 'llm:' section in your yaml. "
-                f"Current backend='{self.cfg.backend}'"
-            )
-        # Context-window guard: truncate user prompt body if needed
+    # ── Dispatch (context guard only — debug + backend in _call above) ───────
+    def _call_guarded(self, system: str, user: str, max_tokens: int) -> str:
+        """Context-window guard wrapper — delegates to _call() for actual dispatch."""
         if len(user) > self.cfg.context_limit:
             user = _truncate(user, self.cfg.context_limit)
-        return self._with_retry(self._backend_fn, system, user, max_tokens)
+        return self._call(system, user, max_tokens)
 
     # ── Public: LLD function generation ──────────────────────────────────────
     def generate(
@@ -911,6 +1013,114 @@ class LLMClient:
             logger.warning("[LLM-TEST] Failed: %s -- using template", exc)
             return ""
 
+    # ── Public: generate NEW LLD function for a FIELD_ADDED field ────────────
+    def generate_new_lld_function(
+        self,
+        ip:           str,
+        reg_name:     str,
+        field_name:   str,
+        access:       str,
+        desc:         str,
+        width:        int = 8,
+        msb:          int = 7,
+        lsb:          int = 0,
+        reset:        int = 0,
+        struct_reg:   str = "",
+        bitfield_path: str = "",
+    ) -> str:
+        """
+        Ask the LLM to generate NEW getter/setter/clear functions for a field
+        that was ADDED in the new SFR revision (FIELD_ADDED change type).
+
+        Called when ``config.generate_new_functions = True`` (default) and
+        no existing LLD function exists for the field.
+
+        Args:
+            ip:            IP name (e.g. "PCIELINK").
+            reg_name:      Register name (e.g. "CTRL_LT0").
+            field_name:    New field name (e.g. "preset_hint").
+            access:        Access type string ("RW", "RO", "W1C", ...).
+            desc:          Full field description from the new SFR.
+            width:         Bit width of the field.
+            msb:           Most significant bit index.
+            lsb:           Least significant bit index.
+            reset:         Reset value.
+            struct_reg:    C struct member name (e.g. "stCTRL_LT0").
+                           Derived as "st{reg_name}" if empty.
+            bitfield_path: Explicit C access path. Derived if empty.
+
+        Returns:
+            Generated C function text, or "" if unavailable.
+        """
+        if not self.available:
+            logger.warning("[LLM-NEW] LLM unavailable -- cannot generate for %s.%s",
+                           reg_name, field_name)
+            return ""
+
+        cache_key = _cache_key(reg_name, field_name, f"NEW_{access}", desc)
+        cached = self._from_cache(cache_key)
+        if cached is not None:
+            logger.debug("[LLM-NEW] Cache hit: %s.%s", reg_name, field_name)
+            return cached
+
+        ip_lo     = ip.lower()
+        st_reg    = struct_reg or f"st{reg_name}"
+        _bpath    = bitfield_path or f"lld->pSFR->{st_reg}.stNative.{field_name}"
+        ret_type  = ("uint8_t"  if width <= 8
+                     else "uint16_t" if width <= 16
+                     else "uint32_t")
+
+        # Which functions to generate
+        acc_up = access.upper()
+        verbs_map = {
+            "RO":    ["getter only"],
+            "WO":    ["setter only"],
+            "RW":    ["getter and setter"],
+            "W1C":   ["getter and clear (W1C)"],
+            "W1S":   ["getter and setter"],
+            "RC":    ["getter only"],
+            "RCW1C": ["getter and clear (W1C)"],
+        }
+        verbs = verbs_map.get(acc_up, ["getter and setter"])[0]
+
+        # Build exact function names list to prevent LLM naming hallucination
+        from lld_gen.change_summary import lld_function_names as _lfns
+        fn_names = _lfns(ip, reg_name, field_name, access)
+        fn_list  = "\n".join(f"  {fn}()" for fn in fn_names)
+
+        user = _LLD_NEW_FN_USER_TMPL.format(
+            ip            = ip,
+            ip_lo         = ip_lo,
+            reg_name      = reg_name,
+            struct_reg    = st_reg,
+            field_name    = field_name,
+            access        = access,
+            msb           = msb,
+            lsb           = lsb,
+            width         = width,
+            reset         = reset,
+            bitfield_path = _bpath,
+            desc          = desc.strip(),
+            verbs         = verbs,
+            return_type   = ret_type,
+            fn_list       = fn_list,
+        )
+
+        logger.info("[LLM-NEW-%s] Generating %s.%s (%s %s-bit) ...",
+                    self.cfg.backend.upper(), reg_name, field_name, access, width)
+        try:
+            raw    = self._call(_LLD_NEW_FN_SYSTEM, user, self.cfg.max_tokens)
+            result = _strip_fences(raw)
+            result = _filter_to_field_functions(result, field_name, "")
+            if result:
+                self._to_cache(cache_key, result)
+                logger.info("[LLM-NEW] %s.%s -> generated (%d chars)",
+                            reg_name, field_name, len(result))
+            return result
+        except Exception as exc:
+            logger.warning("[LLM-NEW] Failed (%s) for %s.%s", exc, reg_name, field_name)
+            return ""
+
     # ── Public: patch an LLD function based on SFR description change ─────────
     def patch_lld_function(
         self,
@@ -923,6 +1133,7 @@ class LLMClient:
         old_fn_text:   str,
         reg_ir_summary: str = "",
         extra_context: str = "",
+        bitfield_path: str = "",
     ) -> str:
         """
         Ask the LLM to patch one or more LLD C functions in response to an SFR
@@ -958,16 +1169,20 @@ class LLMClient:
             return cached
 
         system = _LLD_PATCH_SYSTEM
+        _bpath = bitfield_path or (
+            f"lld->pSFR->st{reg_name}.stNative.{field_name}"
+        )
         user   = _LLD_PATCH_USER_TMPL.format(
-            ip          = ip,
-            reg_name    = reg_name,
-            field_name  = field_name,
-            change_type = change_type,
-            old_desc    = old_desc.strip(),
-            new_desc    = new_desc.strip(),
-            reg_summary = reg_ir_summary or f"Register: {reg_name}, Field: {field_name}",
-            old_fn_text = old_fn_text.strip(),
-            extra       = extra_context.strip() if extra_context else "(none)",
+            ip            = ip,
+            reg_name      = reg_name,
+            field_name    = field_name,
+            change_type   = change_type,
+            old_desc      = old_desc.strip(),
+            new_desc      = new_desc.strip(),
+            reg_summary   = reg_ir_summary or f"Register: {reg_name}, Field: {field_name}",
+            old_fn_text   = old_fn_text.strip(),
+            extra         = extra_context.strip() if extra_context else "(none)",
+            bitfield_path = _bpath,
         )
 
         logger.info(
