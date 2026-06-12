@@ -633,6 +633,10 @@ class LLMClient:
         if not self._backend_fn:
             return ""
 
+        self.last_system_prompt = system
+        self.last_user_prompt = user
+        self.last_raw_response = ""
+
         if self.cfg.debug_llm:
             _W = 72
             _bar = lambda c: c * _W
@@ -651,6 +655,8 @@ class LLMClient:
         t0  = time.perf_counter()
         raw = self._with_retry(self._backend_fn, system, user, max_tokens)
         dt  = time.perf_counter() - t0
+
+        self.last_raw_response = raw
 
         if self.cfg.debug_llm:
             print(f"  --- LLM RESPONSE  ({dt:.2f}s) ---")

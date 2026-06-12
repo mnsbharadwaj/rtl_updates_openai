@@ -106,7 +106,7 @@ def extract_function(text: str, fn_name: str) -> Optional[str]:
     Returns full function text including preceding doxygen comment, or None.
     """
     pattern = re.compile(
-        r"(/\*\*.*?\*/\s*)?"
+        r"(/\*\*(?:(?!\bstatic\s+inline\b).)*?\*/\s*)?"
         r"static\s+inline\s+\S+\s+"
         + re.escape(fn_name)
         + r"\s*\([^)]*\)\s*\{",
@@ -629,6 +629,9 @@ class LLDPatcher:
         self._verbose_cb     = verbose_callback   # (reg, field, ct, before, after, llm, file)
         self._test_stubs: List[str] = []
         self._deprecated_fns: List[str] = []
+        self._added_fns: List[str] = []
+        self._patched_fns: List[str] = []
+        self._removed_fns: List[str] = []
         self._current_lld_file: str = ""          # set by patch() for callback context
         self._llm_used_this_apply: bool = False   # reset before each _apply call
 
@@ -885,6 +888,59 @@ class LLDPatcher:
         """
         ct = cr.change_type
 
+        # Track added / patched / removed functions based on change type
+        from lld_gen.change_summary import lld_function_names as _lfns
+        if ct == ChangeType.REG_SIZE_CHANGED:
+            new_reg = cr.new_reg
+            if new_reg:
+                for f in new_reg.fields.values():
+                    self._patched_fns.extend(_lfns(self.ip, new_reg.name, f.name, f.access))
+        elif ct == ChangeType.FIELD_ADDED:
+            new_f = cr.new_field
+            if new_f:
+                self._added_fns.extend(_lfns(self.ip, cr.reg_name, new_f.name, new_f.access))
+        elif ct == ChangeType.FIELD_DELETED:
+            old_f = cr.old_field
+            if old_f:
+                self._removed_fns.extend(_lfns(self.ip, cr.reg_name, cr.field_name or "", old_f.access))
+        elif ct == ChangeType.FIELD_SPLIT:
+            old_f = cr.old_field
+            if old_f:
+                self._removed_fns.extend(_lfns(self.ip, cr.reg_name, old_f.name, old_f.access))
+            new_reg = cr.new_reg
+            if new_reg:
+                for fname, fobj in new_reg.fields.items():
+                    old_reg = cr.old_reg
+                    if old_reg and fname in old_reg.fields:
+                        continue
+                    self._added_fns.extend(_lfns(self.ip, cr.reg_name, fname, fobj.access))
+        elif ct == ChangeType.FIELD_MERGED:
+            old_reg = cr.old_reg
+            if old_reg:
+                for fname, fobj in old_reg.fields.items():
+                    if cr.new_reg and fname not in cr.new_reg.fields:
+                        self._removed_fns.extend(_lfns(self.ip, cr.reg_name, fname, fobj.access))
+            new_f = cr.new_field
+            if new_f:
+                self._added_fns.extend(_lfns(self.ip, cr.reg_name, new_f.name, new_f.access))
+        elif ct == ChangeType.FIELD_MOVED_CROSS_REG:
+            old_f = cr.old_field
+            if old_f:
+                self._removed_fns.extend(_lfns(self.ip, cr.reg_name, old_f.name, old_f.access))
+        elif ct in {ChangeType.RESERVED_PROMOTED, ChangeType.RESERVED_PARTIAL_ACTIVATED}:
+            new_f = cr.new_field
+            if new_f:
+                self._added_fns.extend(_lfns(self.ip, cr.reg_name, new_f.name, new_f.access))
+        elif ct in {
+            ChangeType.BITWIDTH_CHANGED, ChangeType.ACCESS_CHANGED, ChangeType.OFFSET_CHANGED,
+            ChangeType.RESET_CHANGED, ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED,
+            ChangeType.FIELD_POLARITY_CHANGED, ChangeType.DESCRIPTION_ADDED, ChangeType.FIELD_ENUM_CHANGED,
+            ChangeType.FIELD_WRITE_ONCE, ChangeType.FIELD_SELF_CLEARING, ChangeType.FIELD_STICKY_CHANGED
+        }:
+            ref_f = cr.new_field or cr.old_field
+            if ref_f:
+                self._patched_fns.extend(_lfns(self.ip, cr.reg_name, ref_f.name, ref_f.access))
+
         # ── Types that must not be auto-patched ──────────────────────────────
         if ChangeType.is_manual_review(ct):
             # Store for PR manual-review section — do not touch block
@@ -1120,6 +1176,9 @@ class LLDPatcher:
 
         self._test_stubs          = []
         self._deprecated_fns      = []
+        self._added_fns           = []
+        self._patched_fns         = []
+        self._removed_fns         = []
         self._current_lld_file    = str(lld_path.name)  # for callback context
         self._llm_used_this_apply = False
 
@@ -1210,6 +1269,10 @@ class LLDPatcher:
                 reg = new_ir.registers[cr.reg_name]
                 logger.info("[ADD] Register block: %s", cr.reg_name)
                 new_block = generate_register_block(self.ip, reg)
+                # Track added functions
+                from lld_gen.change_summary import lld_function_names as _lfns
+                for f in reg.fields.values():
+                    self._added_fns.extend(_lfns(self.ip, cr.reg_name, f.name, f.access))
                 self._test_stubs.extend(
                     [generate_test_for_field(self.ip, cr.reg_name, f, reg.offset)
                      for f in reg.fields.values()]
@@ -1250,6 +1313,15 @@ class LLDPatcher:
 
     def get_deprecated_fns(self) -> List[str]:
         return list(self._deprecated_fns)
+
+    def get_added_fns(self) -> List[str]:
+        return list(self._added_fns)
+
+    def get_patched_fns(self) -> List[str]:
+        return list(self._patched_fns)
+
+    def get_removed_fns(self) -> List[str]:
+        return list(self._removed_fns)
 
     # ── Test file writer ─────────────────────────────────────────────────────
     def write_test_file(

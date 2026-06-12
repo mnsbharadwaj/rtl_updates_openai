@@ -96,16 +96,12 @@ def _extract_field_functions(lld_text: str, field_name: str) -> str:
     """
     if not field_name:
         return ""
-    fn_re = re.compile(
-        r'(/\*\*.*?\*/\s*)?'
-        r'(static\s+inline\s+\S+\s+'
-        r'\w*' + re.escape(field_name.lower()) + r'\w*'
-        r'\s*\([^)]*\)\s*\{[^}]*\})',
-        re.DOTALL | re.IGNORECASE,
-    )
+    from lld_gen.lld_patcher import extract_all_functions_for_field
     parts = []
-    for doc, fn in fn_re.findall(lld_text):
-        parts.append((doc.strip() + "\n" + fn.strip()).strip())
+    for reg in ("CTRL_LT0", "CTRL_LT1", "ERR_INJECT", "STATUS"):
+        extracted = extract_all_functions_for_field(lld_text, "PCIELINK", reg, field_name)
+        if extracted:
+            parts.append(extracted)
     return "\n\n".join(parts)
 
 
@@ -263,6 +259,7 @@ class TestPromptBuilding:
             reg_summary="bits 8-11  [RW]  reset=0",
             old_fn_text="static inline uint8_t lld_pcielink_ctrl_lt0_retrain_cnt_get(...) {}",
             extra="(none)",
+            bitfield_path="lld->pSFR->stCTRL_LT0.stNative.retrain_cnt",
         )
         assert old_d in prompt
         assert new_d in prompt
@@ -281,6 +278,7 @@ class TestPromptBuilding:
             reg_summary="bits 8-11 [RW]",
             old_fn_text=fn_text or "/* no fn found */",
             extra="(none)",
+            bitfield_path="lld->pSFR->stCTRL_LT0.stNative.retrain_cnt",
         )
         assert "retrain_cnt" in prompt or "no fn found" in prompt
 
@@ -297,8 +295,9 @@ class TestPromptBuilding:
             change_type="COMMENT_CHANGED",
             old_desc="old", new_desc="new", reg_summary="info",
             old_fn_text="void foo() {}", extra="(none)",
+            bitfield_path="lld->pSFR->stR.stNative.f",
         )
-        assert "Rewrite" in prompt or "rewrite" in prompt
+        assert "Task:" in prompt
 
 
 # ============================================================================

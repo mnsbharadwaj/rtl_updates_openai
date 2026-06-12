@@ -403,6 +403,70 @@ class BatchRunner:
         self.verbose = verbose
         self._results: List[IPResult] = []
 
+    def _print_verbose_classifier_report(
+        self,
+        ip: str,
+        reg_name: str,
+        field_name: str,
+        change_type: str,
+        used_llm: bool,
+        lld_file: str,
+        llm: Optional[object],
+        out_lld: Path,
+    ) -> None:
+        """Prints a detailed verbose report for the patched change."""
+        logger.info("  │")
+        logger.info("  │  [V] ── VERBOSE CLASSIFIER REPORT ──────────────────")
+        logger.info("  │  [V]  1. WHAT'S THE CHANGE:")
+        fld_part = f".{field_name}" if field_name else ""
+        logger.info("  │  [V]     Register/Field : %s%s", reg_name, fld_part)
+        logger.info("  │  [V]     Classifier     : %s", change_type)
+        
+        # 2. Prompts
+        logger.info("  │  [V]  2. PROMPTS SENT TO LLM:")
+        if used_llm and llm and getattr(llm, "last_user_prompt", None):
+            sys_prompt = getattr(llm, "last_system_prompt", "")
+            usr_prompt = getattr(llm, "last_user_prompt", "")
+            logger.info("  │  [V]     --- SYSTEM ---")
+            for ln in sys_prompt.splitlines():
+                logger.info("  │  [V]     | %s", ln)
+            logger.info("  │  [V]     --- USER ---")
+            for ln in usr_prompt.splitlines():
+                logger.info("  │  [V]     | %s", ln)
+        else:
+            logger.info("  │  [V]     (N/A - Deterministic template patch used)")
+
+        # 3. Function received from LLM
+        logger.info("  │  [V]  3. FUNCTION RECEIVED FROM LLM:")
+        if used_llm and llm and getattr(llm, "last_raw_response", None):
+            raw_resp = getattr(llm, "last_raw_response", "")
+            for ln in raw_resp.splitlines():
+                logger.info("  │  [V]     | %s", ln)
+        else:
+            logger.info("  │  [V]     (N/A - Deterministic template patch used)")
+
+        # 4. Files affected
+        logger.info("  │  [V]  4. LIST OF LLD FILES AFFECTED:")
+        logger.info("  │  [V]     - %s", out_lld.name)
+
+        # 5. Line numbers in each file
+        logger.info("  │  [V]  5. LINE NUMBER(S) WHERE PATCHED:")
+        from lld_gen.change_summary import lld_function_names as _lfns
+        fn_names = _lfns(ip, reg_name, field_name or "", "RW")
+        found_any = False
+        if out_lld.exists():
+            lines = out_lld.read_text(encoding="utf-8", errors="replace").splitlines()
+            for fn in fn_names:
+                for idx, line in enumerate(lines, 1):
+                    if fn in line and "static" in line and "inline" in line:
+                        logger.info("  │  [V]     - %s:%d (function: %s)", out_lld.name, idx, fn)
+                        found_any = True
+                        break
+        if not found_any:
+            logger.info("  │  [V]     - (No matching function signatures found; block/struct change)")
+        logger.info("  │  [V] ───────────────────────────────────────────────")
+        logger.info("  │")
+
     # -----------------------------------------------------------------------
     def run(self) -> List[IPResult]:
         _hdr("LLD Auto-Patcher  ▶  Batch Mode", "═")
@@ -626,14 +690,18 @@ class BatchRunner:
             _ok(f"Found {len(lld_hits)} LLD file(s) to patch")
             _step_done()
 
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 4 — Patch each LLD file
+            # ── Step 4 ── Patch each LLD file
             # ─────────────────────────────────────────────────────────────────
             _step("5", "5", f"Patch {len(lld_hits)} LLD file(s)")
             all_manual: List[str] = [
                 f"{cr.change_type}: {cr.reg_name}" + (f".{cr.field_name}" if cr.field_name else "")
                 for cr in manual_crs
             ]
+
+            all_added_fns: List[str] = []
+            all_patched_fns: List[str] = []
+            all_removed_fns: List[str] = []
+            all_deprecated_fns: List[str] = []
 
             for file_idx, (lld_src, relevant_changes) in enumerate(lld_hits.items(), 1):
                 out_lld   = self.cfg.output_dir / lld_src.name
@@ -658,7 +726,15 @@ class BatchRunner:
                             "LLM (cloud gpt-oss)" if llm.available else "template")
 
                 # Build verbose callback if enabled
-                verbose_cb = _print_before_after if self.verbose else None
+                if self.verbose:
+                    def verbose_cb(reg_name: str, field_name: str, change_type: str,
+                                   before: str, after: str, used_llm: bool, lld_file: str):
+                        _print_before_after(reg_name, field_name, change_type, before, after, used_llm, lld_file)
+                        self._print_verbose_classifier_report(
+                            job.ip, reg_name, field_name, change_type, used_llm, lld_file, llm, out_lld
+                        )
+                else:
+                    verbose_cb = None
 
                 patcher = LLDPatcher(
                     ip=job.ip,
@@ -710,6 +786,12 @@ class BatchRunner:
 
                 result.patched_llds.append(out_lld)
 
+                # Collect tracked functions
+                all_added_fns.extend(patcher.get_added_fns())
+                all_patched_fns.extend(patcher.get_patched_fns())
+                all_removed_fns.extend(patcher.get_removed_fns())
+                all_deprecated_fns.extend(patcher.get_deprecated_fns())
+
                 # Optional compile check
                 if gcc_exe and test_file.exists():
                     logger.info("  │     Running GCC compile check ...")
@@ -746,6 +828,9 @@ class BatchRunner:
                     lld_file            = first_out,
                     test_file           = self.cfg.tests_dir / f"test_{job.ip.lower()}_{first_out.stem}.c",
                     sfr_new             = job.new_sfr,
+                    added_fns           = sorted(list(set(all_added_fns + all_patched_fns))),
+                    removed_fns         = sorted(list(set(all_removed_fns))),
+                    deprecated_fns      = sorted(list(set(all_deprecated_fns))),
                     no_git              = no_git,
                     github_url          = getattr(self.cfg, "github_url", ""),
                     manual_review_items = all_manual or None,
