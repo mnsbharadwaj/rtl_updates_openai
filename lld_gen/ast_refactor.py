@@ -197,6 +197,55 @@ def get_function_renames(ip: str, changes: List[ChangeRecord]) -> Dict[str, str]
     return renames
 
 
+def strip_balanced_keyword(text: str, keyword: str) -> str:
+    """
+    Finds occurrences of keyword followed by a parenthesized block, e.g.
+    __attribute__((...)) or __declspec(...), and replaces the entire construct
+    with spaces of the exact same length to preserve line/column coordinates.
+    """
+    out = []
+    i = 0
+    n = len(text)
+    kw_len = len(keyword)
+    while i < n:
+        if text.startswith(keyword, i):
+            # Check word boundaries
+            if i > 0 and (text[i-1].isalnum() or text[i-1] == '_'):
+                out.append(text[i])
+                i += 1
+                continue
+            if i + kw_len < n and (text[i + kw_len].isalnum() or text[i + kw_len] == '_'):
+                out.append(text[i])
+                i += 1
+                continue
+            
+            # Find the start of the parenthesis (allowing up to 50 spaces)
+            start_paren = -1
+            for k in range(i + kw_len, min(n, i + kw_len + 50)):
+                if text[k] == "(":
+                    start_paren = k
+                    break
+                elif not text[k].isspace():
+                    break
+            
+            if start_paren != -1:
+                paren_depth = 1
+                j = start_paren + 1
+                while j < n and paren_depth > 0:
+                    if text[j] == "(":
+                        paren_depth += 1
+                    elif text[j] == ")":
+                        paren_depth -= 1
+                    j += 1
+                length = j - i
+                out.append(" " * length)
+                i = j
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def refactor_file(
     file_path: Path,
     changes: List[ChangeRecord],
@@ -236,6 +285,15 @@ def refactor_file(
 
     # Strip comments to prevent parse errors in pycparser while keeping line numbers
     code_for_parser = remove_comments_keep_spacing(cleaned_code)
+
+    # Strip compiler-specific attributes and keywords to prevent parse errors in pycparser
+    # while preserving line/column coordinates exactly
+    code_for_parser = strip_balanced_keyword(code_for_parser, "__attribute__")
+    code_for_parser = strip_balanced_keyword(code_for_parser, "__declspec")
+    
+    # Replace other compiler-specific keywords with spaces of same length
+    for kw in ["__restrict__", "__restrict", "__extension__", "__inline__", "__inline", "__forceinline", "__volatile__", "__volatile"]:
+        code_for_parser = re.sub(r'\b' + re.escape(kw) + r'\b', " " * len(kw), code_for_parser)
 
     # Parse C code
     parser = CustomCParser(custom_typedefs)
