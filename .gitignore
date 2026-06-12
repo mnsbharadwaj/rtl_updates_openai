@@ -8,6 +8,7 @@ llm_runtime/*.dylib
 
 # ── LLM response cache — regenerated automatically ─────────────────────────
 .sfr_gen_cache/
+.lld_gen_cache/
 
 # ── Python artifacts ────────────────────────────────────────────────────────
 __pycache__/

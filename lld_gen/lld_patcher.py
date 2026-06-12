@@ -62,7 +62,7 @@ _SHA_BLOCK_BEGIN = re.compile(
 
 _STATIC_INLINE_RE = re.compile(
     r"(/\*\*.*?\*/\s*)?"
-    r"static\s+inline\s+\S+\s+(\w+)\s*\([^)]*\)"
+    r"(?:static\s+)?(?:inline\s+)?\S+(?:\s+\S+)?\s+(\w+)\s*\([^)]*\)"
     r"\s*\{",
     re.DOTALL
 )
@@ -106,8 +106,8 @@ def extract_function(text: str, fn_name: str) -> Optional[str]:
     Returns full function text including preceding doxygen comment, or None.
     """
     pattern = re.compile(
-        r"(/\*\*(?:(?!\bstatic\s+inline\b).)*?\*/\s*)?"
-        r"static\s+inline\s+\S+\s+"
+        r"(/\*\*(?:(?!\b(?:static\s+)?(?:inline\s+)?\b\w+\s+\w+\s*\().)*?\*/\s*)?"
+        r"(?:static\s+)?(?:inline\s+)?\S+(?:\s+\S+)?\s+"
         + re.escape(fn_name)
         + r"\s*\([^)]*\)\s*\{",
         re.DOTALL,
@@ -441,7 +441,7 @@ def _deprecate_block(block: str, reg_name: str) -> Tuple[str, List[str]]:
     Mark a deleted register's block as deprecated.
     Returns (annotated_block, list_of_function_names).
     """
-    fn_names = re.findall(r"static\s+inline\s+\S+\s+(lld_\w+)\s*\(", block)
+    fn_names = re.findall(r"(?:static\s+)?(?:inline\s+)?\S+(?:\s+\S+)?\s+(lld_\w+)\s*\(", block)
     dep_header = (
         f"\n/* ⚠ DEPRECATED: SFR register {reg_name} was DELETED in the new SFR version.\n"
         f" * The functions below are no longer backed by hardware registers.\n"
@@ -1174,6 +1174,7 @@ class LLDPatcher:
         backup   = lld_path.with_suffix(".h.bak")
         backup.write_text(original, encoding="utf-8")
 
+        self._changes             = changes
         self._test_stubs          = []
         self._deprecated_fns      = []
         self._added_fns           = []
@@ -1349,10 +1350,23 @@ class LLDPatcher:
         llm_count = template_count = 0
 
         if new_ir is not None:
+            changed_fields = set()
+            if hasattr(self, "_changes") and self._changes:
+                for cr in self._changes:
+                    if cr.field_name:
+                        changed_fields.add((cr.reg_name.upper(), cr.field_name.upper()))
+                    elif cr.change_type == ChangeType.REG_ADDED and new_ir:
+                        reg_added = new_ir.registers.get(cr.reg_name)
+                        if reg_added:
+                            for fname_added in reg_added.fields:
+                                changed_fields.add((cr.reg_name.upper(), fname_added.upper()))
+
             seen: set = set()
             for reg_name in sorted(new_ir.registers):
                 reg = new_ir.registers[reg_name]
                 for fname in sorted(reg.fields):
+                    if (reg_name.upper(), fname.upper()) not in changed_fields:
+                        continue
                     fld = reg.fields[fname]
                     key = f"{reg_name}.{fname}"
                     if key in seen:

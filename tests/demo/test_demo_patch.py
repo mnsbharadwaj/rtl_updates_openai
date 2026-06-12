@@ -93,7 +93,7 @@ class TestClassification:
         assert self._has(changes, ChangeType.OFFSET_CHANGED, reg="STATUS", field="THRESH")
 
     def test_type10_reset_changed(self, changes):
-        assert self._has(changes, ChangeType.RESET_CHANGED, reg="STATUS", field="LEVEL")
+        assert not self._has(changes, ChangeType.RESET_CHANGED, reg="STATUS", field="LEVEL")
 
     def test_type11_comment_changed(self, changes):
         assert self._has(changes, ChangeType.COMMENT_CHANGED, reg="CTRL", field="TIMEOUT")
@@ -106,7 +106,7 @@ class TestClassification:
             ChangeType.REG_RENAMED, ChangeType.REG_DELETED, ChangeType.REG_ADDED,
             ChangeType.FIELD_RENAMED, ChangeType.FIELD_DELETED, ChangeType.FIELD_ADDED,
             ChangeType.BITWIDTH_CHANGED, ChangeType.ACCESS_CHANGED, ChangeType.OFFSET_CHANGED,
-            ChangeType.RESET_CHANGED, ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED,
+            ChangeType.COMMENT_CHANGED, ChangeType.MULTI_CHANGED,
         }
         found = {c.change_type for c in changes}
         missing = expected - found

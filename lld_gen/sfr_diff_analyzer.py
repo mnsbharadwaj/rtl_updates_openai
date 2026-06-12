@@ -1134,12 +1134,22 @@ class SfrDiffAnalyzer:
         old_reg: RegisterIR, new_reg: RegisterIR,
     ) -> List[ChangeRecord]:
         """Classify a changed field using priority 7–28."""
+        # Check if the only difference is the reset value (ignored per customer requirement)
+        if (old_f.popcount == new_f.popcount and
+            old_f.access == new_f.access and
+            old_f.shift == new_f.shift and
+            old_f.desc.strip() == new_f.desc.strip() and
+            old_f.mask == new_f.mask and
+            old_f.msb == new_f.msb and
+            old_f.lsb == new_f.lsb):
+            return []
+
         diffs: List[str] = []
 
         bitwidth_changed  = old_f.popcount    != new_f.popcount
         access_changed    = old_f.access      != new_f.access
         offset_changed    = old_f.shift       != new_f.shift
-        reset_changed     = old_f.reset       != new_f.reset
+        reset_changed     = False  # Ignored as a change per customer requirement
         comment_changed   = old_f.desc.strip() != new_f.desc.strip()
         desc_added        = (not old_f.has_desc) and new_f.has_desc
 
@@ -1640,16 +1650,8 @@ class DiffBasedAnalyzer:
         removed_fields = {k: v for k, v in removed.items() if not k.startswith("__")}
         added_fields   = {k: v for k, v in added.items()   if not k.startswith("__")}
 
-        # Reset value changed
-        old_reset_str = (removed.get("__RESET__") or {}).get("reset", "")
-        new_reset_str = (added.get("__RESET__")   or {}).get("reset", "")
-        if old_reset_str and new_reset_str and old_reset_str != new_reset_str:
-            rname = (removed.get("__RESET__") or {}).get("reg", reg_name) or reg_name
-            changes.append(ChangeRecord(
-                change_type=ChangeType.RESET_CHANGED,
-                reg_name=rname,
-                details=[f"reset {old_reset_str} -> {new_reset_str}"],
-            ))
+        # Reset value changes ignored per customer requirement
+        pass
 
         rem_names = set(removed_fields)
         add_names = set(added_fields)

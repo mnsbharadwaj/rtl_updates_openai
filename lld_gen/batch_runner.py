@@ -752,6 +752,22 @@ class BatchRunner:
                 patch_s = time.perf_counter() - t_patch
                 logger.info("  │     ✔ Patch complete in %.1fs  →  %s", patch_s, out_lld)
 
+                # AST-Based Cross-Refactoring
+                if getattr(self.cfg, "cross_lld_scan", True):
+                    from lld_gen.ast_refactor import refactor_cross_references
+                    logger.info("  │     Running AST-based cross-refactoring ...")
+                    auto_crs = [cr for cr in relevant_changes if not ChangeType.is_manual_review(cr.change_type)]
+                    ast_patched_files = refactor_cross_references(
+                        cfg       = self.cfg,
+                        ip        = job.ip,
+                        new_ir    = new_ir,
+                        auto_crs  = auto_crs,
+                        out_lld   = out_lld,
+                        test_file = test_file,
+                    )
+                    if ast_patched_files:
+                        logger.info("  │     ✔ AST-based cross-refactoring updated %d file(s)", len(ast_patched_files))
+
                 if self.verbose:
                     # Summarise what was patched in this file
                     auto_ct    = [cr for cr in relevant_changes if not ChangeType.is_manual_review(cr.change_type)]

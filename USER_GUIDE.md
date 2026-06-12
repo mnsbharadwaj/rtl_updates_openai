@@ -86,43 +86,63 @@ The parser relies on **Structured Comments** in the SFR `.h` files to interpret 
 
 ## 4. Configuration Management
 
-Configuration is handled using YAML files (`lld_patcher.yaml` or `workflow_config.yaml`). Below is a guide to the key parameters:
+Configuration is handled using YAML files (`lld_patcher.yaml` or `workflow_config.yaml`). Below is a complete guide to all available parameters with descriptions and examples:
 
 ```yaml
 # =============================================================================
-# Directories
+# 4.1 Directories
 # =============================================================================
 sfr_old_dir: "./old_sfr"          # Folder containing original SFR headers
 sfr_new_dir: "./new_sfr"          # Folder containing updated SFR headers
 lld_dir:     "./lld"              # Folder containing existing driver files
-output_dir:  "./lld_patched"      # Folder where patched files will be written
+output_dir:  "./lld_patched"      # Folder where patched LLD headers are written
 tests_dir:   "./tests_generated"  # Folder where functional test C files are written
 
 # =============================================================================
-# LLM Settings
+# 4.2 LLM Settings & Gating
 # =============================================================================
-no_llm:       false               # false = Enable LLM patching for comments/complex types
-ollama_model: "qwen2.5-coder"     # Local Ollama model name (leaves blank to use HF)
-hf_token:     ""                  # HuggingFace Token (alternative to HF_TOKEN env var)
-llm_test_gen: true                # true = LLM writes rich struct-based test assertions
+no_llm:       false               # true = Disable LLM patching; use templates/flag manual review
+debug_llm:    false               # true = Print raw prompts & LLM responses to stdout for debugging
+llm:
+  backend:     "ollama"           # LLM Backend: ollama | huggingface | openai | anthropic
+  model:       "qwen2.5-coder:7b" # Model identifier (e.g. qwen2.5-coder:7b or gpt-4o-mini)
+  url:         "http://localhost:11434" # Custom backend url (optional)
+  api_key:     ""                 # API key / HuggingFace Token (or use env HF_TOKEN)
+  temperature: 0.1                # low temperature (0.0-0.2) ensures deterministic C code
+  max_tokens:  600                # Token budget per function patch query
+
+# Gating Thresholds:
+# Ratio (SequenceMatcher) of old vs new description text:
+#  - Below low threshold (default 0.75): Auto-patch directly via LLM.
+#  - Above high threshold (default 0.85): Auto-skip as cosmetic (no code patch needed).
+#  - In-between (0.75 - 0.85): Call LLM to confirm if semantic change exists.
+semantic_similarity_threshold_low:  0.75
+semantic_similarity_threshold_high: 0.85
 
 # =============================================================================
-# Compiler Settings
+# 4.3 Compiler Settings & Self-Correction
 # =============================================================================
-gcc: "C:/path/to/gcc.exe"         # Path to gcc binary (set to null to auto-detect in PATH)
+gcc: null                         # Path to gcc binary (null = search system PATH)
 compile_check: true               # true = Stop pipeline if gcc compiler is not found
-per_fn_compile: true              # true = Run gcc compile check after every single patch
+per_fn_compile: true              # true = Run gcc compile check after every single patched function
+max_llm_retries: 5                # Number of compiler self-correction retry loops on syntax failure
 
 # =============================================================================
-# Patching and Git Automation Rules
+# 4.4 Patching & Refactoring Rules
 # =============================================================================
-max_llm_retries: 5                # Number of compiler self-correction retry loops
-skip_reg_added:   true            # true = Mark added registers for manual review (recommended)
-skip_reg_deleted: true            # true = Mark deleted registers for manual review (recommended)
-cross_lld_scan:   true            # true = Scan workspace for references affected by deletions
-no_git:           false           # false = Stage modifications and commit automatically
-github_url: "https://github.com/..." # Repository URL for PR creation link
+generate_new_functions: true      # true = Generate templates for newly added fields (FIELD_ADDED)
+skip_reg_added:   true            # true = Flag REG_ADDED registers for manual review (recommended)
+skip_reg_deleted: true            # true = Flag REG_DELETED registers for manual review (recommended)
+cross_lld_scan:   true            # true = Scan directories for other files containing modified refs
+lld_search_depth: 3               # Directory search depth limit for cross-file scan
+
+# =============================================================================
+# 4.5 Git & PR Automation
+# =============================================================================
+no_git:           false           # false = Stage modifications & write PR_DESCRIPTION.md
+github_url: ""                    # Remote repo URL (autodetected from origin if empty)
 ```
+
 
 ### 4.1 Key Operational Modes: GCC & LLM Configurations
 
