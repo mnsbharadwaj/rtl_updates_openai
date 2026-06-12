@@ -191,10 +191,31 @@ def _cmd_run(args: argparse.Namespace) -> None:
     parser = SfrParser(ip=ip)
     new_ir = parser.parse_file(args.new)
     llm    = _make_llm(args)
+
+    # Build verbose callback if enabled
+    verbose_cb = None
+    if getattr(args, "verbose", False):
+        from lld_gen.batch_runner import BatchRunner, _print_before_after
+        runner = BatchRunner(cfg=None, verbose=True)
+        def verbose_cb(reg_name: str, field_name: str, change_type: str,
+                       before: str, after: str, used_llm: bool, lld_file: str):
+            _print_before_after(reg_name, field_name, change_type, before, after, used_llm, lld_file)
+            runner._print_verbose_classifier_report(
+                ip=ip,
+                reg_name=reg_name,
+                field_name=field_name,
+                change_type=change_type,
+                used_llm=used_llm,
+                lld_file=lld_file,
+                llm=llm,
+                out_lld=Path(args.lld)
+            )
+
     patcher = LLDPatcher(
         ip=ip,
         llm_client=llm,
         no_llm=getattr(args, "no_llm", False),
+        verbose_callback=verbose_cb,
     )
     patcher.patch(args.lld, changes, new_ir=new_ir)
 
@@ -262,7 +283,9 @@ def _cmd_run_config(args: argparse.Namespace) -> None:
     if getattr(args, "force_no_llm", False):
         cfg.force_no_llm = True
 
-    runner  = BatchRunner(cfg)
+    if getattr(args, "verbose", False):
+        cfg.verbose = True
+    runner  = BatchRunner(cfg, verbose=getattr(args, "verbose", False))
     results = runner.run()   # timing printed inside run()
 
     fail_count = sum(1 for r in results if r.status == "FAIL")
@@ -544,8 +567,10 @@ def _cmd_workflow(args: argparse.Namespace) -> None:
         cfg.no_git = True
     if getattr(args, "force_no_llm", False):
         cfg.force_no_llm = True
+    if getattr(args, "verbose", False):
+        cfg.verbose = True
 
-    runner = WorkflowRunner(cfg)
+    runner = WorkflowRunner(cfg, verbose=getattr(args, "verbose", False))
 
     if getattr(args, "dry_run", False):
         # Dry-run: clone and diff only, no patching
@@ -651,6 +676,7 @@ def _build_parser() -> argparse.ArgumentParser:
     r.add_argument("--no-git",  action="store_true", help="Skip git add")
     r.add_argument("--gcc",     default=None,  metavar="EXE")
     r.add_argument("--hf-token",default="",   metavar="TOKEN")
+    r.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 
     # ── run-config (batch from config file) ─────────────────────────────────
     rc = sub.add_parser(
@@ -664,6 +690,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--no-llm", action="store_true", help="Override config: disable LLM")
     rc.add_argument("--force-no-llm", action="store_true", help="Override config: skip LLM prompt")
     rc.add_argument("--no-git", action="store_true", help="Override config: skip git add")
+    rc.add_argument("--verbose", "-v", action="store_true", help="Override config: enable verbose logging")
 
     # ── init-config (generate starter config) ────────────────────────────────
     ic = sub.add_parser(
@@ -689,6 +716,7 @@ def _build_parser() -> argparse.ArgumentParser:
     wf.add_argument("--force-no-llm", action="store_true", help="Override: skip LLM prompt")
     wf.add_argument("--no-git",  action="store_true", help="Override: skip git/PR")
     wf.add_argument("--dry-run", action="store_true", help="Clone + diff only, no patch")
+    wf.add_argument("--verbose", "-v", action="store_true", help="Override: enable verbose logging")
 
     # ── init-workflow-config ─────────────────────────────────────────────────
     iwf = sub.add_parser(

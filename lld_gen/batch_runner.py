@@ -228,11 +228,31 @@ def _print_before_after(
     label  = f"{reg_name}.{field_name}" if field_name else reg_name
     llm_tag = " ✓LLM" if used_llm else ""
 
+    import re as _re
+    from pathlib import Path
+    file_path = Path(lld_file)
+    display_name = file_path.name
+
     logger.info("  │")
-    logger.info("  │  ├── [VERBOSE] Change applied in: %s", lld_file)
+    logger.info("  │  ├── [VERBOSE] Change applied in: %s", display_name)
     logger.info("  │  │   Field    : %s", label)
     logger.info("  │  │   Type     : %-30s  Method: %s%s",
                 change_type, method, llm_tag)
+
+    if file_path.exists():
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        lines = content.splitlines()
+        pattern_str = rf"\blld_\w+_{reg_name.lower()}_{field_name.lower()}_(?:get|set|clear|set1|trigger)\b"
+        fn_re = _re.compile(pattern_str, _re.IGNORECASE)
+        found_fns = []
+        for idx, line in enumerate(lines, 1):
+            match = fn_re.search(line)
+            if match:
+                fn_name = match.group(0)
+                if any(kw in line for kw in ("static", "inline", "void", "uint")):
+                    if fn_name not in found_fns:
+                        found_fns.append(fn_name)
+                        logger.info("  │  │   Patched Function: %s (at line %d)", fn_name, idx)
 
     # Only print before/after for changed blocks or LLM-patched
     is_large   = len(before) > _LARGE_BLOCK_CHARS or len(after) > _LARGE_BLOCK_CHARS
@@ -400,7 +420,7 @@ class BatchRunner:
 
     def __init__(self, cfg: PatcherConfig, verbose: bool = False):
         self.cfg     = cfg
-        self.verbose = verbose
+        self.verbose = verbose or cfg.verbose
         self._results: List[IPResult] = []
 
     def _print_verbose_classifier_report(
@@ -456,9 +476,10 @@ class BatchRunner:
         found_any = False
         if out_lld.exists():
             lines = out_lld.read_text(encoding="utf-8", errors="replace").splitlines()
+            import re as _re
             for fn in fn_names:
                 for idx, line in enumerate(lines, 1):
-                    if fn in line and "static" in line and "inline" in line:
+                    if fn in line and _re.search(rf"\b{_re.escape(fn)}\b\s*\(", line):
                         logger.info("  │  [V]     - %s:%d (function: %s)", out_lld.name, idx, fn)
                         found_any = True
                         break
@@ -908,7 +929,7 @@ class BatchRunner:
 def run_from_config(config_path, verbose: bool = False) -> List[IPResult]:
     """Load config and run the full batch pipeline."""
     cfg    = load_config(config_path)
-    runner = BatchRunner(cfg, verbose=verbose)
+    runner = BatchRunner(cfg, verbose=verbose or cfg.verbose)
     return runner.run()
 
 

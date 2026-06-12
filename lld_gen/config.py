@@ -90,6 +90,7 @@ class PatcherConfig:
     # v3.3 — semantic description equivalence gate
     semantic_similarity_threshold_low:  float = 0.75  # below → auto-patch (skip check)
     semantic_similarity_threshold_high: float = 0.85  # above → auto-skip (mark equivalent)
+    verbose:                           bool  = False # Enable verbose logging and classifier reports
 
 
 @dataclass
@@ -244,6 +245,7 @@ def load_workflow_config(config_path: str | Path) -> "WorkflowConfig":
         # v3.3 — semantic description equivalence gate
         semantic_similarity_threshold_low  = float(data.get("semantic_similarity_threshold_low",  0.75)),
         semantic_similarity_threshold_high = float(data.get("semantic_similarity_threshold_high", 0.85)),
+        verbose                            = bool(data.get("verbose", False)),
     )
 
 
@@ -306,6 +308,7 @@ def load_config(config_path: str | Path) -> PatcherConfig:
         lld_all_files = bool(data.get("lld_all_files", False)),
         semantic_similarity_threshold_low  = float(data.get("semantic_similarity_threshold_low",  0.75)),
         semantic_similarity_threshold_high = float(data.get("semantic_similarity_threshold_high", 0.85)),
+        verbose       = bool(data.get("verbose", False)),
     )
 
 

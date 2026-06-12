@@ -1180,7 +1180,7 @@ class LLDPatcher:
         self._added_fns           = []
         self._patched_fns         = []
         self._removed_fns         = []
-        self._current_lld_file    = str(lld_path.name)  # for callback context
+        self._current_lld_file    = str(lld_path)  # for callback context
         self._llm_used_this_apply = False
 
         # ── Step 1: Update struct section ──────────────────────────────────
