@@ -420,6 +420,13 @@ class WorkflowRunner:
                 logger.error(f"  [E] FAIL: {exc}")
                 return result
 
+            added_count = len(patcher.get_added_fns())
+            patched_count = len(patcher.get_patched_fns())
+            removed_count = len(patcher.get_removed_fns())
+            total_affected = added_count + patched_count + removed_count
+            logger.info("  [E]   ✔ Patch complete for %s (%d function(s) affected: %d added, %d patched, %d removed)",
+                        lld_file.name, total_affected, added_count, patched_count, removed_count)
+
             # Verbose patch summary per LLD file
             if self.verbose:
                 logger.info("  [E]")

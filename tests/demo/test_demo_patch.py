@@ -143,10 +143,10 @@ class TestPatchOutput:
         assert "#endif" in patched_content
 
     def test_struct_lld_driver_generated(self, patched_content):
-        """Aggregate SFR struct and lld driver struct must appear."""
+        """Aggregate SFR struct and lld driver struct must not appear (defined externally)."""
         assert "struct lld_dma" in patched_content
-        assert "pSFR_DMA" in patched_content
-        assert "SFR_DMA, *pSFR_DMA" in patched_content
+        assert "pSFR_DMA" not in patched_content
+        assert "SFR_DMA, *pSFR_DMA" not in patched_content
 
     def test_struct_members_use_st_prefix(self, patched_content):
         """Struct member names use st prefix."""

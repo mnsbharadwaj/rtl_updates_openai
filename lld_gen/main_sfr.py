@@ -103,6 +103,11 @@ def _cmd_patch(args: argparse.Namespace) -> None:
 
     print(f"[patch] Patching {args.lld} ...")
     patcher.patch(args.lld, changes, new_ir=new_ir, out_path=args.out or args.lld)
+    added_count = len(patcher.get_added_fns())
+    patched_count = len(patcher.get_patched_fns())
+    removed_count = len(patcher.get_removed_fns())
+    total_affected = added_count + patched_count + removed_count
+    print(f"[patch] Patch complete ({total_affected} function(s) affected: {added_count} added, {patched_count} patched, {removed_count} removed)")
 
     # Write test file
     tests_dir = Path(args.tests_dir) if getattr(args, "tests_dir", None) else Path(args.lld).parent
@@ -218,6 +223,11 @@ def _cmd_run(args: argparse.Namespace) -> None:
         verbose_callback=verbose_cb,
     )
     patcher.patch(args.lld, changes, new_ir=new_ir)
+    added_count = len(patcher.get_added_fns())
+    patched_count = len(patcher.get_patched_fns())
+    removed_count = len(patcher.get_removed_fns())
+    total_affected = added_count + patched_count + removed_count
+    print(f"[patch] Patch complete for {args.lld} ({total_affected} function(s) affected: {added_count} added, {patched_count} patched, {removed_count} removed)")
 
     test_file = Path(args.lld).parent / "test_lld_generated.c"
     sfr_name  = Path(args.new).name

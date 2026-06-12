@@ -771,7 +771,14 @@ class BatchRunner:
                     out_path = out_lld,
                 )
                 patch_s = time.perf_counter() - t_patch
-                logger.info("  │     ✔ Patch complete in %.1fs  →  %s", patch_s, out_lld)
+                added_count = len(patcher.get_added_fns())
+                patched_count = len(patcher.get_patched_fns())
+                removed_count = len(patcher.get_removed_fns())
+                total_affected = added_count + patched_count + removed_count
+                logger.info(
+                    "  │     ✔ Patch complete in %.1fs  →  %s (%d function(s) affected: %d added, %d patched, %d removed)",
+                    patch_s, out_lld, total_affected, added_count, patched_count, removed_count
+                )
 
                 # AST-Based Cross-Refactoring
                 if getattr(self.cfg, "cross_lld_scan", True):

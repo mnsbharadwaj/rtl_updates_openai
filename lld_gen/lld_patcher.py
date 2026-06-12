@@ -312,8 +312,8 @@ def generate_lld_structs(ip: str, new_ir: SfrIR) -> str:
     return "\n".join(lines)
 
 
-def _replace_struct_section(content: str, ip: str, new_struct_text: str) -> str:
-    """Replace existing LLD_IP_STRUCTS section or insert after first #include."""
+def _remove_struct_section(content: str, ip: str) -> str:
+    """Remove existing LLD_IP_STRUCTS section from content completely if present."""
     ip_up = ip.upper()
     begin = f"/* === BEGIN LLD_{ip_up}_STRUCTS ==="
     end   = f"/* === END LLD_{ip_up}_STRUCTS === */"
@@ -322,17 +322,12 @@ def _replace_struct_section(content: str, ip: str, new_struct_text: str) -> str:
     e_pos = content.find(end)
 
     if b_pos != -1 and e_pos != -1:
-        # Replace existing section
-        return content[:b_pos] + new_struct_text + "\n" + content[e_pos + len(end):]
-
-    # Insert after last #include line
-    lines  = content.splitlines(keepends=True)
-    insert = 0
-    for i, ln in enumerate(lines):
-        if ln.strip().startswith("#include"):
-            insert = i + 1
-    lines.insert(insert, "\n" + new_struct_text + "\n\n")
-    return "".join(lines)
+        # Strip the section completely (including leading/trailing whitespace around it)
+        before = content[:b_pos]
+        after = content[e_pos + len(end):]
+        # Clean up double newlines that might be left behind
+        return before.rstrip() + "\n\n" + after.lstrip()
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -1183,11 +1178,8 @@ class LLDPatcher:
         self._current_lld_file    = str(lld_path)  # for callback context
         self._llm_used_this_apply = False
 
-        # ── Step 1: Update struct section ──────────────────────────────────
-        content = original
-        if new_ir is not None:
-            struct_text = generate_lld_structs(self.ip, new_ir)
-            content     = _replace_struct_section(content, self.ip, struct_text)
+        # ── Step 1: Remove aggregate struct section if present ─────────────
+        content = _remove_struct_section(original, self.ip)
 
         # ── Step 2: Build per-change lookup ────────────────────────────────
         changes_by_reg: Dict[str, List[ChangeRecord]] = {}
