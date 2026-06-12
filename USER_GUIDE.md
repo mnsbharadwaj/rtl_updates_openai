@@ -56,6 +56,9 @@ A native GCC compiler is required to run syntax checks and execute functional te
      ```bash
      ollama pull qwen2.5-coder:1.5b
      ```
+* **Cloud Ollama Backend (Dedicated remote server)**: High-performance shared endpoint.
+  1. Point the `url` to the dedicated cloud/internal Ollama server address.
+  2. Set `location: "cloud"` in your configuration file.
 * **Cloud Backend (HuggingFace Inference API)**:
   1. Obtain an API token from your HuggingFace account profile settings.
   2. Export it as an environment variable:
@@ -107,9 +110,17 @@ llm:
   backend:     "ollama"           # LLM Backend: ollama | huggingface | openai | anthropic
   model:       "qwen2.5-coder:7b" # Model identifier (e.g. qwen2.5-coder:7b or gpt-4o-mini)
   url:         "http://localhost:11434" # Custom backend url (optional)
+  location:    "local"            # local | cloud (e.g., set to cloud for remote servers)
   api_key:     ""                 # API key / HuggingFace Token (or use env HF_TOKEN)
   temperature: 0.1                # low temperature (0.0-0.2) ensures deterministic C code
   max_tokens:  600                # Token budget per function patch query
+
+# Example Cloud Ollama Configuration:
+# llm:
+#   backend:   "ollama"
+#   model:     "gpt-oss"
+#   url:       "http://107.99.41.85/ollama/srv1/api/generate"
+#   location:  "cloud"
 
 # Gating Thresholds:
 # Ratio (SequenceMatcher) of old vs new description text:
