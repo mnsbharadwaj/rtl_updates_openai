@@ -283,6 +283,9 @@ class IPResult:
     new_sfr:      Path
     patched_llds: List[Path] = field(default_factory=list)
     n_changes:    int = 0
+    n_added:      int = 0
+    n_patched:    int = 0
+    n_removed:    int = 0
     status:       str = "PENDING"   # OK | WARN | FAIL | SKIP
     error:        str = ""
     elapsed_s:    float = 0.0
@@ -775,6 +778,9 @@ class BatchRunner:
                 patched_count = len(patcher.get_patched_fns())
                 removed_count = len(patcher.get_removed_fns())
                 total_affected = added_count + patched_count + removed_count
+                result.n_added   += added_count
+                result.n_patched += patched_count
+                result.n_removed += removed_count
                 logger.info(
                     "  │     ✔ Patch complete in %.1fs  →  %s (%d function(s) affected: %d added, %d patched, %d removed)",
                     patch_s, out_lld, total_affected, added_count, patched_count, removed_count
@@ -902,15 +908,16 @@ class BatchRunner:
         logger.info("")
         _hdr("BATCH SUMMARY", "═")
 
-        col = "  {:<12}  {:<8}  {:>8}  {:>7}  {}"
-        logger.info(col.format("IP", "Status", "Changes", "Time", "Patched LLD(s)"))
-        logger.info("  " + "─"*12 + "  " + "─"*8 + "  " + "─"*8 + "  " + "─"*7 + "  " + "─"*35)
+        col = "  {:<12}  {:<8}  {:>8}  {:>18}  {:>7}  {}"
+        logger.info(col.format("IP", "Status", "SFR Chg", "LLD Fns (+/~/-)", "Time", "Patched LLD(s)"))
+        logger.info("  " + "─"*12 + "  " + "─"*8 + "  " + "─"*8 + "  " + "─"*18 + "  " + "─"*7 + "  " + "─"*35)
 
         ok = warn = fail = skip = 0
         for r in self._results:
             icon = {"OK": "✔ OK", "WARN": "⚠ WARN", "FAIL": "✘ FAIL", "SKIP": "○ SKIP"}.get(r.status, r.status)
             lld_names = ", ".join(p.name for p in r.patched_llds) or "(none)"
-            logger.info(col.format(r.ip, icon, r.n_changes, f"{r.elapsed_s:.1f}s", lld_names))
+            lld_fns = f"{r.n_added}/{r.n_patched}/{r.n_removed}"
+            logger.info(col.format(r.ip, icon, r.n_changes, lld_fns, f"{r.elapsed_s:.1f}s", lld_names))
             if r.error:
                 logger.error("               └─ Error: %s", r.error)
             ok   += r.status == "OK"

@@ -1513,6 +1513,17 @@ class DiffBasedAnalyzer:
                         details=[f"renamed {oname} -> {nname}"],
                     ))
 
+        # Populate IR fields (old_field, new_field, old_reg, new_reg) on all ChangeRecords
+        parser = SfrParser(ip=self.ip)
+        try:
+            old_ir = parser.parse_text(old_text, source="<old>")
+        except Exception:
+            old_ir = None
+        try:
+            new_ir = parser.parse_text(new_text, source="<new>")
+        except Exception:
+            new_ir = None
+
         # Deduplicate (same reg+field+type)
         seen: set = set()
         out: List[ChangeRecord] = []
@@ -1520,6 +1531,44 @@ class DiffBasedAnalyzer:
             key = (cr.change_type, cr.reg_name, cr.field_name or "")
             if key not in seen:
                 seen.add(key)
+                
+                # Look up registers
+                if old_ir and cr.reg_name in old_ir.registers:
+                    cr.old_reg = old_ir.registers[cr.reg_name]
+                if new_ir and cr.reg_name in new_ir.registers:
+                    cr.new_reg = new_ir.registers[cr.reg_name]
+                
+                # For REG_RENAMED:
+                if cr.change_type == ChangeType.REG_RENAMED:
+                    if cr.details:
+                        parts = cr.details[0].split(" -> ")
+                        if len(parts) == 2:
+                            nname = parts[1].strip()
+                            if new_ir and nname in new_ir.registers:
+                                cr.new_reg = new_ir.registers[nname]
+
+                # Look up fields
+                if cr.field_name:
+                    if cr.old_reg and cr.field_name in cr.old_reg.fields:
+                        cr.old_field = cr.old_reg.fields[cr.field_name]
+                    elif old_ir and cr.reg_name in old_ir.registers and cr.field_name in old_ir.registers[cr.reg_name].fields:
+                        cr.old_field = old_ir.registers[cr.reg_name].fields[cr.field_name]
+
+                    if cr.change_type == ChangeType.FIELD_RENAMED:
+                        if cr.details:
+                            parts = cr.details[0].split(" -> ")
+                            if len(parts) == 2:
+                                renamed_to = parts[1].strip()
+                                if cr.new_reg and renamed_to in cr.new_reg.fields:
+                                    cr.new_field = cr.new_reg.fields[renamed_to]
+                                elif new_ir and cr.reg_name in new_ir.registers and renamed_to in new_ir.registers[cr.reg_name].fields:
+                                    cr.new_field = new_ir.registers[cr.reg_name].fields[renamed_to]
+                    else:
+                        if cr.new_reg and cr.field_name in cr.new_reg.fields:
+                            cr.new_field = cr.new_reg.fields[cr.field_name]
+                        elif new_ir and cr.reg_name in new_ir.registers and cr.field_name in new_ir.registers[cr.reg_name].fields:
+                            cr.new_field = new_ir.registers[cr.reg_name].fields[cr.field_name]
+
                 out.append(cr)
         return out
 
@@ -1583,14 +1632,30 @@ class DiffBasedAnalyzer:
     def _line_to_reg(self, text: str) -> Dict[int, str]:
         """Map line number (1-indexed) -> current register name at that line."""
         result: Dict[int, str] = {}
-        current_reg = ""
-        for i, ln in enumerate(text.splitlines(), 1):
+        lines = text.splitlines()
+        
+        # First pass: find all typedef block start and end ranges
+        blocks = []
+        start_idx = None
+        for i, ln in enumerate(lines, 1):
             ms = _DIFF_TYPEDEF_START_RE.search(ln)
             if ms:
-                current_reg = ""  # pending until closing typedef
+                start_idx = i
             me = _DIFF_TYPEDEF_END_RE.search(ln)
-            if me:
-                current_reg = self._extract_reg_name(me.group(1))
+            if me and start_idx is not None:
+                reg_name = self._extract_reg_name(me.group(1))
+                blocks.append((start_idx, i, reg_name))
+                start_idx = None
+                
+        # Second pass: map line numbers to registers based on these blocks
+        current_reg = ""
+        for i in range(1, len(lines) + 1):
+            in_block = False
+            for start, end, rname in blocks:
+                if start <= i <= end:
+                    current_reg = rname
+                    in_block = True
+                    break
             result[i] = current_reg
         return result
 
