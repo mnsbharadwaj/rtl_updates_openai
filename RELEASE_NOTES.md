@@ -1,35 +1,74 @@
-# SSRI LLD Auto-Patcher Release Notes — Version 2.0
+# SSRI LLD Auto-Patcher Release Notes — Version 2.1
 
-We are pleased to release **Version 2.0** of the **Samsung SSRI LLD Auto-Patcher**. This version adds support for modern C++ codebases, integrates deep cross-file AST refactoring in batch operations, limits functional tests to patched logic, and implements smart optimization gates to reduce LLM overhead.
+We are pleased to release **Version 2.1** of the **Samsung SSRI LLD Auto-Patcher**. This update resolves parser limitations in the C AST refactoring engine, introduces a fallback mechanism for missing register blocks, and enhances observability with detailed function-level summaries at the end of runs.
 
 ---
 
-## What's New in Version 2.0
+## What's New in Version 2.1
 
-### 1. C++ Function Signature & Inline Compatibility
-* **Flexibility**: The function parser and deprecation engine are now fully compatible with both C and C++ function signatures.
-* **Support**: Correctly extracts and patches functions containing the `inline` keyword alone (without `static`), class member functions, or regular functions, and supports multi-token C/C++ return types (e.g. `unsigned int` or `volatile uint16_t`).
+### 1. Robust C AST Parsing & Custom Typedef Extraction
+* **Robustness**: The cross-refactoring parser (`ast_refactor`) is now immune to parse errors caused by custom pointer definitions, hardware types, or non-standard types (e.g. `pSFR_HSATU`, `SFR_PCIELINK`, `uint32`, `u32`, etc.).
+* **Dynamic Scans**: The parser dynamically scans all driver header files prior to parsing, extracts all local single-word and struct/union typedef declarations, and registers them dynamically in the lexer symbol table.
 
-### 2. Batch Cross-File AST Refactoring
-* **Propagating Changes**: When registers or fields are renamed/deleted, the changes are now automatically refactored in-place across **all** caller LLD files in the scan directory when running in config-driven `run-config` mode (reusing the AST-based pycparser cross-refactoring engine from the workflow mode).
+### 2. Missing Register Block Fallback
+* **Fallback Appends**: When field-level modifications (like `FIELD_ADDED` or `BITWIDTH_CHANGED`) target a register that has no existing block in the LLD header, the patcher automatically generates and appends the entire register block (and all of its field functions) to the file.
+* **Accuracy**: Prevents the patcher from silently skipping changes for new or previously unexposed registers.
 
-### 3. Selective Functional Unit Test Generation
-* **Reduced Clutter**: Instead of generating unit test assertions for the entire register map, the pipeline now generates functional test stubs **only for patched or added LLD functions**. This reduces compilation overhead and makes the test suite highly focused on the actual changes.
+### 3. File-Level LLD Function Summary
+* **Granular Observability**: The console output at the end of a batch run now displays a detailed summary list of exactly which C/C++ functions were added, patched, or removed per LLD file.
 
-### 4. Reset Value Change Ignoring
-* **Efficiency**: Reset value changes alone are now classified as cosmetic and ignored as functional changes. The diff engine will not generate patching tasks, run LLM calls, or produce PR change rows for pure reset value updates, preventing unnecessary LLM token cost.
+---
 
-### 5. Two-Stage Semantic Description Gate
-* **Description Filtering**: Description updates (e.g. `COMMENT_CHANGED`) undergo a two-stage filter:
-  1. **Heuristic string similarity**: Skips LLM calls if description similarity is above 85%.
-  2. **Lightweight LLM YES/NO equivalence check**: For borderline cases (75%-85% similarity), queries the LLM with a small prompt to verify semantic difference before initiating a full code patch.
+## Brief User Guide
 
-### 6. Native Union SFR Format Parser
-* **Format Support**: Adds automatic parser detection for plain `typedef union` bitfields with reset value annotations (`_value(0x...)`) grouped inside an IP-level struct with base address offsets, commonly used in newer CXL and PCIe IPs.
+### 1. Installation & Setup
+Ensure dependencies are installed:
+```bash
+pip install -r requirements.txt
+```
 
-### 7. Verbose Classifier Logging
-* **Observability**: When `verbose` config is enabled, outputs a detailed report for each job/classifier detailing:
-  1. What changed (old vs new definition).
-  2. Prompts sent to the LLM.
-  3. Raw response received from the LLM.
-  4. Affected LLD files and modified line numbers.
+*(Optional)* Install GCC for compiler checks:
+* **Windows**:
+  ```powershell
+  winget install BrechtSanders.WinLibs.POSIX.UCRT --accept-source-agreements --accept-package-agreements
+  ```
+  *(Update the `gcc:` path in your `lld_patcher.yaml` to point to the installed `gcc.exe`)*
+
+### 2. Command Reference
+
+#### Running Batch Orchestration (Config-Driven)
+Process all IPs and their respective LLD headers as defined in the YAML configuration:
+```bash
+python -m lld_gen.main_sfr run-config --config lld_patcher.yaml
+```
+
+#### Verbose Mode (Recommended for Auditing)
+To see full prompt logs, LLM responses, and detailed file diffs during the run:
+```bash
+python -m lld_gen.main_sfr run-config --config lld_patcher.yaml --verbose
+```
+
+#### Offline/Template-Only Mode
+To run completely locally and deterministically without making any LLM network/local calls:
+```bash
+python -m lld_gen.main_sfr run-config --config lld_patcher.yaml --no-llm
+```
+
+#### Single IP Run
+Process a single IP block directly from the CLI:
+```bash
+python -m lld_gen.main_sfr run \
+    --old old_sfr/sfr_pmu.h \
+    --new new_sfr/sfr_pmu.h \
+    --lld lld/lld_pmu.h \
+    --ip PMU
+```
+
+### 3. Register Comment Invariant
+Every field inside your SFR `.h` files must match this comment pattern for the parser to extract access rules:
+```c
+/* FIELDNAME [MSB:LSB] ACCESS — Description */
+#define PERIPH_REG_FIELDNAME_MASK   0x000000XXU
+#define PERIPH_REG_FIELDNAME_SHIFT  XU
+```
+Supported Access flags: `RW`, `RO`, `WO`, `W1C`, `W1S`.
