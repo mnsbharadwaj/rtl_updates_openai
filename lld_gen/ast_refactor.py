@@ -23,8 +23,13 @@ STANDARD_TYPEDEFS = {
     "uint8_t", "uint16_t", "uint32_t", "uint64_t",
     "int8_t", "int16_t", "int32_t", "int64_t",
     "UINT8", "UINT16", "UINT32", "UINT64",
-    "size_t", "bool", "boolean", "BOOL", "UINT", "USHORT", "ULONG"
+    "size_t", "bool", "boolean", "BOOL", "UINT", "USHORT", "ULONG",
+    "uint8", "uint16", "uint32", "uint64",
+    "u8", "u16", "u32", "u64",
+    "s8", "s16", "s32", "s64",
+    "int8", "int16", "int32", "int64"
 }
+
 
 class CustomCParser(c_parser.CParser):
     """
@@ -401,16 +406,29 @@ def refactor_cross_references(
         
     # 3. Dynamically collect hardware typedefs from new_ir and files
     custom_typedefs = set()
+    custom_typedefs.add(f"SFR_{ip.upper()}")
+    custom_typedefs.add(f"pSFR_{ip.upper()}")
     if new_ir and hasattr(new_ir, "registers"):
         for rname in new_ir.registers.keys():
             custom_typedefs.add(f"SFR_{ip.upper()}_{rname.upper()}")
             custom_typedefs.add(f"pSFR_{ip.upper()}_{rname.upper()}")
             
-    # Also extract any SFR_ or pSFR_ names found in the files' contents
+    # Also extract any SFR_ or pSFR_ names and general typedefs found in the files' contents
     for file_path in files_to_scan:
         try:
             text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+            # 1. Match SFR_/pSFR_ types
             for m in re.finditer(r'\b(SFR_[A-Za-z0-9_]+|pSFR_[A-Za-z0-9_]+)\b', text):
+                custom_typedefs.add(m.group(1))
+            # 2. Match single-word typedef declarations (e.g. typedef unsigned int uint32;)
+            for m in re.finditer(r'\btypedef\s+[^;]+?\b(\w+)\s*;', text):
+                custom_typedefs.add(m.group(1))
+            # 3. Match struct/union typedefs with double declarators (e.g. } SFR_CLK, *pSFR_CLK;)
+            for m in re.finditer(r'\}\s*(\w+)\s*,\s*\*?(\w+)\s*;', text):
+                custom_typedefs.add(m.group(1))
+                custom_typedefs.add(m.group(2))
+            # 4. Match struct/union typedefs with single declarator (e.g. } SFR_CLK;)
+            for m in re.finditer(r'\}\s*(\w+)\s*;', text):
                 custom_typedefs.add(m.group(1))
         except Exception:
             continue

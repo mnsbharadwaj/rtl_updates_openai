@@ -425,6 +425,7 @@ class BatchRunner:
         self.cfg     = cfg
         self.verbose = verbose or cfg.verbose
         self._results: List[IPResult] = []
+        self._file_level_summaries: Dict[str, Dict[str, List[str]]] = {}
 
     def _print_verbose_classifier_report(
         self,
@@ -836,6 +837,13 @@ class BatchRunner:
 
                 result.patched_llds.append(out_lld)
 
+                # Store per-file function summaries
+                self._file_level_summaries[out_lld.name] = {
+                    "added": sorted(list(set(patcher.get_added_fns()))),
+                    "patched": sorted(list(set(patcher.get_patched_fns()))),
+                    "removed": sorted(list(set(patcher.get_removed_fns())))
+                }
+
                 # Collect tracked functions
                 all_added_fns.extend(patcher.get_added_fns())
                 all_patched_fns.extend(patcher.get_patched_fns())
@@ -930,6 +938,36 @@ class BatchRunner:
         logger.info(_bar("─"))
         logger.info("  IPs total    : %d   ✔ OK=%d  ⚠ WARN=%d  ✘ FAIL=%d  ○ SKIP=%d",
                     len(self._results), ok, warn, fail, skip)
+
+        # Print file-level function summaries if any functions were affected
+        any_affected = False
+        for file_name, fns in sorted(self._file_level_summaries.items()):
+            if fns["added"] or fns["patched"] or fns["removed"]:
+                any_affected = True
+                break
+
+        if any_affected:
+            logger.info("")
+            logger.info("  FILE-LEVEL LLD FUNCTION PATCH SUMMARY")
+            logger.info("  " + "═"*70)
+            for file_name, fns in sorted(self._file_level_summaries.items()):
+                if not (fns["added"] or fns["patched"] or fns["removed"]):
+                    continue
+                logger.info("  • %s:", file_name)
+                if fns["added"]:
+                    logger.info("    + Added (%d):", len(fns["added"]))
+                    for fn in fns["added"]:
+                        logger.info("      • %s", fn)
+                if fns["patched"]:
+                    logger.info("    ~ Patched (%d):", len(fns["patched"]))
+                    for fn in fns["patched"]:
+                        logger.info("      • %s", fn)
+                if fns["removed"]:
+                    logger.info("    - Removed (%d):", len(fns["removed"]))
+                    for fn in fns["removed"]:
+                        logger.info("      • %s", fn)
+            logger.info("  " + "─"*70)
+
         logger.info("  Output LLDs  : %s", self.cfg.output_dir)
         logger.info("  Test files   : %s", self.cfg.tests_dir)
         logger.info("  Total time   : %dm %02ds  (%.2fs)", m, s, elapsed)

@@ -1197,11 +1197,14 @@ class LLDPatcher:
         # ── Step 3: Split + process blocks ─────────────────────────────────
         segments  = self._split_blocks(content)
         out_parts: List[str] = []
+        processed_regs = set()
 
         for (reg_name, sha, block) in segments:
             if reg_name is None:
                 out_parts.append(block)
                 continue
+
+            processed_regs.add(reg_name)
 
             # Auto-migrate base[] → struct-based before applying changes
             if not _is_struct_based(block) and new_ir and reg_name in new_ir.registers:
@@ -1256,20 +1259,26 @@ class LLDPatcher:
 
         content = "".join(out_parts)
 
-        # ── Step 4: Append entirely new register blocks ─────────────────────
-        for cr in reg_adds:
-            if new_ir and cr.reg_name in new_ir.registers:
-                reg = new_ir.registers[cr.reg_name]
-                logger.info("[ADD] Register block: %s", cr.reg_name)
+        # ── Step 4: Append entirely new register blocks or registers with changes but missing blocks ──
+        missing_regs = set(changes_by_reg.keys()) - processed_regs
+        appended_regs = set()
+
+        def append_reg_block(reg_name: str):
+            if reg_name in appended_regs:
+                return
+            if new_ir and reg_name in new_ir.registers:
+                reg = new_ir.registers[reg_name]
+                logger.info("[ADD] Register block: %s", reg_name)
                 new_block = generate_register_block(self.ip, reg)
                 # Track added functions
                 from lld_gen.change_summary import lld_function_names as _lfns
                 for f in reg.fields.values():
-                    self._added_fns.extend(_lfns(self.ip, cr.reg_name, f.name, f.access))
+                    self._added_fns.extend(_lfns(self.ip, reg_name, f.name, f.access))
                 self._test_stubs.extend(
-                    [generate_test_for_field(self.ip, cr.reg_name, f, reg.offset)
+                    [generate_test_for_field(self.ip, reg_name, f, reg.offset)
                      for f in reg.fields.values()]
                 )
+                nonlocal content
                 endif_pos = content.rfind("#endif")
                 if endif_pos != -1:
                     content = (
@@ -1277,6 +1286,13 @@ class LLDPatcher:
                     )
                 else:
                     content += "\n" + new_block + "\n"
+                appended_regs.add(reg_name)
+
+        for cr in reg_adds:
+            append_reg_block(cr.reg_name)
+
+        for reg_name in sorted(missing_regs):
+            append_reg_block(reg_name)
 
         # ── Step 5: Brace-balance check ─────────────────────────────────────
         if not self._check_braces(content):
