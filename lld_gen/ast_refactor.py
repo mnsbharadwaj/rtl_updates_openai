@@ -180,26 +180,10 @@ def get_function_renames(ip: str, changes: List[ChangeRecord]) -> Dict[str, str]
     """
     Build a mapping of compiled function name regex patterns to their new names
     based on the ChangeRecords (register renames or field renames).
+    
+    Disabled: Function names are kept completely frozen and are not renamed.
     """
-    renames: Dict[str, str] = {}
-    if not ip or not changes:
-        return renames
-    ip_lo = ip.lower()
-    for cr in changes:
-        if cr.change_type == ChangeType.REG_RENAMED and cr.old_reg and cr.new_reg:
-            # Matches any verb/field after the register: lld_ip_oldreg_field_verb -> lld_ip_newreg_field_verb
-            pattern = rf"\blld_{ip_lo}_{cr.old_reg.name.lower()}_([a-zA-Z0-9_]+)\b"
-            replacement = f"lld_{ip_lo}_{cr.new_reg.name.lower()}_\\1"
-            renames[pattern] = replacement
-        elif cr.change_type == ChangeType.FIELD_RENAMED and cr.old_field and cr.new_field:
-            reg_lo = cr.reg_name.lower()
-            old_f = cr.old_field.name.lower()
-            new_f = cr.new_field.name.lower()
-            for verb in ("get", "set", "clear", "set1", "trigger"):
-                old_fn = f"lld_{ip_lo}_{reg_lo}_{old_f}_{verb}"
-                new_fn = f"lld_{ip_lo}_{reg_lo}_{new_f}_{verb}"
-                renames[rf"\b{old_fn}\b"] = new_fn
-    return renames
+    return {}
 
 
 def strip_balanced_keyword(text: str, keyword: str) -> str:
