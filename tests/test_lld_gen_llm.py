@@ -82,3 +82,35 @@ def test_cloud_llm_routing_payload(mock_post):
     assert payload["stream"] is False
     assert "System Instruction:\nsystem instruction" in payload["prompt"]
     assert "User Context and Request:\nuser prompt" in payload["prompt"]
+
+
+@patch("requests.post")
+def test_cloud_llm_custom_url_and_model_override(mock_post):
+    """Verify that cloud location routing respects custom URL and model name config overrides."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"response": "static inline void overridden_fn() {}"}
+    mock_post.return_value = mock_resp
+
+    # Config with explicit custom URL (no API path suffix) and model
+    cfg = LLMConfig(
+        backend="ollama",
+        model="custom-coder-30b",
+        url="http://my-cloud-ollama:11434/ollama-endpoint",
+        location="cloud"
+    )
+    client = LLMClient(cfg)
+    assert client.available is True
+    assert client._backend_fn == client._call_cloud_ollama
+
+    res = client._backend_fn(system="sys", user="user", max_tokens=100)
+    assert res == "static inline void overridden_fn() {}"
+
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    # Suffix '/api/generate' should be automatically appended to custom url without suffix
+    assert args[0] == "http://my-cloud-ollama:11434/ollama-endpoint/api/generate"
+    payload = kwargs["json"]
+    # Model should be overridden with the custom name
+    assert payload["model"] == "custom-coder-30b"
+    assert payload["stream"] is False

@@ -669,7 +669,20 @@ class LLMClient:
 
     # ── Backend: Cloud Ollama ─────────────────────────────────────────────────
     def _call_cloud_ollama(self, system: str, user: str, max_tokens: int) -> str:
-        url = "http://107.99.41.85/ollama/srv1/api/generate"
+        # Resolve URL dynamically: use configured url if specified and not the local default
+        url = self.cfg.url
+        if not url or url.rstrip("/") == "http://localhost:11434":
+            url = "http://107.99.41.85/ollama/srv1/api/generate"
+        
+        # Ensure it has the correct API suffix if it doesn't already have one
+        if url and not (url.endswith("/api/generate") or url.endswith("/api/chat")):
+            url = f"{url.rstrip('/')}/api/generate"
+
+        # Resolve model dynamically: default to gpt-oss if empty or using local defaults
+        model = self.cfg.model
+        if not model or model in ("qwen2.5-coder:7b", "qwen2.5-coder:1.5b"):
+            model = "gpt-oss"
+
         prompt = (
             f"System Instruction:\n{system}\n\n"
             f"User Context and Request:\n{user}\n\n"
@@ -677,7 +690,7 @@ class LLMClient:
             "Return only the C code, without any markdown code fences, explanation, or prose."
         )
         payload = {
-            "model": "gpt-oss",
+            "model": model,
             "prompt": prompt,
             "stream": False,
         }

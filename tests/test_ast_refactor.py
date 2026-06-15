@@ -315,4 +315,180 @@ static inline void sync_pmu_with_clock(struct lld_pmu *lld, struct lld_clock *cl
         assert "stCLOCK_CON" not in updated_text
 
 
+def test_ast_cross_refactor_non_matching_filenames():
+    """
+    Verify that AST cross-refactoring works correctly across multiple files
+    with names that do not match the IP names (e.g. driver_a.c, helper_x.h etc.)
+    and correctly updates 2 or more LLD files.
+    """
+    # Define the mock structures and contents of the 5 LLD files:
+    
+    # 1. driver_a.c references PMU's PMU_CON and CLK's PLL_CON
+    driver_a_code = """
+#include <stdint.h>
+struct lld_pmu { pSFR_PMU pSFR; };
+struct lld_clk { pSFR_CLK pSFR; };
+void do_sync_a(struct lld_pmu *pmu, struct lld_clk *clk) {
+    pmu->pSFR->stPMU_CON.stNative.DMA_EN = 1;
+    clk->pSFR->stPLL_CON.stNative.PLL_EN = 1;
+}
+"""
+
+    # 2. driver_b.c references CLK's PLL_CON and SYS's SYS_CON
+    driver_b_code = """
+#include <stdint.h>
+struct lld_clk { pSFR_CLK pSFR; };
+struct lld_sys { pSFR_SYS pSFR; };
+void do_sync_b(struct lld_clk *clk, struct lld_sys *sys) {
+    clk->pSFR->stPLL_CON.stNative.PLL_EN = 0;
+    sys->pSFR->stSYS_CON.stNative.SYS_EN = 1;
+}
+"""
+
+    # 3. helper_x.h references SYS's SYS_CON
+    helper_x_code = """
+#include <stdint.h>
+struct lld_sys { pSFR_SYS pSFR; };
+static inline void sys_helper(struct lld_sys *sys) {
+    sys->pSFR->stSYS_CON.stNative.SYS_EN = 0;
+}
+"""
+
+    # 4. io_manager.c references PMU's PMU_CON and SYS's SYS_CON
+    io_manager_code = """
+#include <stdint.h>
+struct lld_pmu { pSFR_PMU pSFR; };
+struct lld_sys { pSFR_SYS pSFR; };
+void sys_init(struct lld_pmu *pmu, struct lld_sys *sys) {
+    pmu->pSFR->stPMU_CON.stNative.DMA_EN = 0;
+    sys->pSFR->stSYS_CON.stNative.SYS_EN = 1;
+}
+"""
+
+    # 5. core_base.h has no accesses to PMU/CLK/SYS registers
+    core_base_code = """
+#include <stdint.h>
+void core_noop(void) {
+    int x = 42;
+}
+"""
+
+    # Mock configuration class to supply lld_dir / output_dir to refactor_cross_references
+    class MockConfig:
+        def __init__(self, lld_dir):
+            self.lld_dir = lld_dir
+            self.output_dir = None
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write files with names that don't match PMU, CLK, or SYS
+        f1 = Path(tmpdir) / "driver_a.c"
+        f2 = Path(tmpdir) / "driver_b.c"
+        f3 = Path(tmpdir) / "helper_x.h"
+        f4 = Path(tmpdir) / "io_manager.c"
+        f5 = Path(tmpdir) / "core_base.h"
+        
+        f1.write_text(driver_a_code, encoding="utf-8")
+        f2.write_text(driver_b_code, encoding="utf-8")
+        f3.write_text(helper_x_code, encoding="utf-8")
+        f4.write_text(io_manager_code, encoding="utf-8")
+        f5.write_text(core_base_code, encoding="utf-8")
+        
+        # Define change records for PMU, CLK, and SYS renames
+        pmu_change = ChangeRecord(
+            change_type = ChangeType.REG_RENAMED,
+            reg_name    = "PMU_CON",
+            field_name  = None,
+            old_reg     = RegisterIR("PMU_CON", 0, {}),
+            new_reg     = RegisterIR("PMU_CTRL", 0, {}),
+            needs_llm   = False,
+            details     = []
+        )
+        
+        clk_change = ChangeRecord(
+            change_type = ChangeType.REG_RENAMED,
+            reg_name    = "PLL_CON",
+            field_name  = None,
+            old_reg     = RegisterIR("PLL_CON", 0, {}),
+            new_reg     = RegisterIR("PLL_CTRL", 0, {}),
+            needs_llm   = False,
+            details     = []
+        )
+        
+        sys_change = ChangeRecord(
+            change_type = ChangeType.REG_RENAMED,
+            reg_name    = "SYS_CON",
+            field_name  = None,
+            old_reg     = RegisterIR("SYS_CON", 0, {}),
+            new_reg     = RegisterIR("SYS_CTRL", 0, {}),
+            needs_llm   = False,
+            details     = []
+        )
+        
+        cfg = MockConfig(lld_dir=tmpdir)
+        
+        # Test Case 1: Refactor PMU_CON to PMU_CTRL.
+        # This should patch driver_a.c and io_manager.c (2 files updated).
+        patched_pmu = refactor_cross_references(
+            cfg = cfg,
+            ip = "PMU",
+            new_ir = None,
+            auto_crs = [pmu_change]
+        )
+        # Verify filenames are mapped and resolved
+        patched_names = [f.name for f in patched_pmu]
+        assert "driver_a.c" in patched_names
+        assert "io_manager.c" in patched_names
+        assert len(patched_names) == 2
+        
+        # Verify that their content was updated
+        assert "stPMU_CTRL" in f1.read_text(encoding="utf-8")
+        assert "stPMU_CTRL" in f4.read_text(encoding="utf-8")
+        assert "stPMU_CON" not in f1.read_text(encoding="utf-8")
+        assert "stPMU_CON" not in f4.read_text(encoding="utf-8")
+        
+        # Test Case 2: Refactor PLL_CON to PLL_CTRL for CLK IP.
+        # This should patch driver_a.c and driver_b.c (2 files updated).
+        patched_clk = refactor_cross_references(
+            cfg = cfg,
+            ip = "CLK",
+            new_ir = None,
+            auto_crs = [clk_change]
+        )
+        patched_names_clk = [f.name for f in patched_clk]
+        assert "driver_a.c" in patched_names_clk
+        assert "driver_b.c" in patched_names_clk
+        assert len(patched_names_clk) == 2
+        
+        assert "stPLL_CTRL" in f1.read_text(encoding="utf-8")
+        assert "stPLL_CTRL" in f2.read_text(encoding="utf-8")
+        assert "stPLL_CON" not in f1.read_text(encoding="utf-8")
+        assert "stPLL_CON" not in f2.read_text(encoding="utf-8")
+        
+        # Test Case 3: Refactor SYS_CON to SYS_CTRL for SYS IP.
+        # This should patch driver_b.c, helper_x.h, and io_manager.c (3 files updated).
+        patched_sys = refactor_cross_references(
+            cfg = cfg,
+            ip = "SYS",
+            new_ir = None,
+            auto_crs = [sys_change]
+        )
+        patched_names_sys = [f.name for f in patched_sys]
+        assert "driver_b.c" in patched_names_sys
+        assert "helper_x.h" in patched_names_sys
+        assert "io_manager.c" in patched_names_sys
+        assert len(patched_names_sys) == 3
+        
+        assert "stSYS_CTRL" in f2.read_text(encoding="utf-8")
+        assert "stSYS_CTRL" in f3.read_text(encoding="utf-8")
+        assert "stSYS_CTRL" in f4.read_text(encoding="utf-8")
+        
+        # Test Case 4: Verify core_base.h was never touched or modified.
+        assert "core_noop" in f5.read_text(encoding="utf-8")
+        # Its timestamp or contents should be completely untouched
+        # and not reported in any patched file lists.
+        assert f5 not in patched_pmu
+        assert f5 not in patched_clk
+        assert f5 not in patched_sys
+
+
 
