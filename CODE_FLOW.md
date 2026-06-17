@@ -31,13 +31,17 @@ graph TD
   2. Compares registers by offset, name, comment headers, and bit ranges.
   3. Returns a list of `ChangeRecord` objects with designated `ChangeType` classifiers (e.g. `REG_RENAMED`, `FIELD_ADDED`, `BITWIDTH_CHANGED`).
 
-### B. LLDPatcher & Missing Register Fallback
+### B. LLDPatcher, Missing Register Fallback & Semantic LLD Generation
 * **Module**: [lld_gen/lld_patcher.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/lld_patcher.py)
 * **Flow**:
   1. Reads the existing `lld.h` file and splits it into register-based blocks keyed by `SRC_SHA` comment anchors.
   2. **Missing Register Fallback**: It compares the changed registers list against the blocks parsed from the LLD file. If a changed register has no matching block in the LLD file, the patcher dynamically invokes `generate_register_block()` to construct the missing functions (getters/setters/clears) and appends the block to the LLD file.
-  3. It applies modifications surgically per block. If a change requires semantic generation, it prepares prompts for the LLM.
-  4. Collects and updates list of modified, added, and removed function signatures.
+  3. **Semantic LLD Function Generation**:
+     - When a field is added (`FIELD_ADDED`), if the field change request requires LLM intervention (`needs_llm` is True) and the LLM client is configured, the patcher queries the LLM to generate custom semantic LLD functions.
+     - The LLM analyzes the field access type and description (e.g., "(RW) 1: enable, 0: disable" or "(WO) trigger write transaction") to write tailored semantic actions like `lld_<ip>_<reg>_<field>_<verb>` (e.g., `lld_pmu_ctrl_dma_en_enable`).
+     - If the LLM generates a function successfully, it is appended to the block. If it fails or is disabled, the system falls back to standard getter/setter templates.
+  4. It applies modifications surgically per block. If a change requires semantic generation, it prepares prompts for the LLM.
+  5. Collects and updates list of modified, added, and removed function signatures.
 
 ### C. LLM Routing & Dynamic Cloud Endpoint Overrides
 * **Module**: [lld_gen/llm_client.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/llm_client.py)
@@ -50,16 +54,20 @@ graph TD
      - Evaluates `self.cfg.model`. If not empty or a local name, it overrides the default `gpt-oss` model name.
   4. Calls the cloud API with a single flattened `prompt` payload and returns the raw C block.
 
-### D. AST Cross-Refactoring & Frozen Names
+### D. AST Cross-Refactoring, C++ Preprocessing & Frozen Names
 * **Module**: [lld_gen/ast_refactor.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/ast_refactor.py)
 * **Flow**:
   1. Scans the LLD scan folders recursively for C/C++ files (`*.c`, `*.h`, `*.cpp`).
   2. Extracts all local typedef declarators (including hardware structs/unions) dynamically to construct symbol table definitions.
-  3. Pre-processes code by commenting preprocessors (`#`) and stripping compiler-specific keywords (like `__attribute__`) to prevent parse errors.
-  4. Parses source code into a C AST using `pycparser`.
-  5. Traverses AST looking for member access paths referencing the modified structures.
-  6. **Frozen Function Names**: Disables LLD function renames (returns empty mapping in `get_function_renames`), keeping driver calls intact while successfully updating only the struct member access bodies (e.g. `pSFR->stPMU_CON` becomes `pSFR->stPMU_CTRL`).
-  7. Reconstructs lines in-place without shifting columns or breaking line positions.
+  3. **C++ Preprocessing & Stripping (In-Memory)**:
+     - Strips C++ `extern "C" { ... }` blocks using a stack-based brace-matching scanner to replace braces/linkages with spaces, ensuring position alignment.
+     - Strips class/struct access specifiers (`public:`, `private:`, `protected:`) using regex replacements.
+     - Strips struct member initializers (e.g. `= {0x0000000}`) to prevent pycparser parsing errors, while maintaining exact coordinates.
+  4. Pre-processes code by commenting preprocessors (`#`) and stripping compiler-specific keywords (like `__attribute__`) to prevent parse errors.
+  5. Parses source code into a C AST using `pycparser`.
+  6. Traverses AST looking for member access paths referencing the modified structures.
+  7. **Frozen Function Names**: Disables LLD function renames (returns empty mapping in `get_function_renames`), keeping driver calls intact while successfully updating only the struct member access bodies (e.g. `pSFR->stPMU_CON` becomes `pSFR->stPMU_CTRL`).
+  8. Reconstructs lines in-place without shifting columns or breaking line positions.
 
 ### E. End-of-Run File-Level Summary
 * **Module**: [lld_gen/batch_runner.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/batch_runner.py)
@@ -80,3 +88,5 @@ If you need to tweak the behavior of the auto-patcher, here are the exact entry 
 | **Change default cloud defaults** | [lld_gen/llm_client.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/llm_client.py) | Edit the fallbacks inside `_call_cloud_ollama()`. |
 | **Adjust change classifiers** | [lld_gen/sfr_diff_analyzer.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/sfr_diff_analyzer.py) | Tweak priority sorting rules in `classify_field_change()`. |
 | **Tweak generated function headers** | [lld_gen/lld_patcher.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/lld_patcher.py) | Modify the template generators `_getter()`, `_setter()`, or `_w1c_clear()`. |
+| **Adjust C++ Preprocessing Rules** | [lld_gen/ast_refactor.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/ast_refactor.py) | Edit `strip_extern_c()` and `strip_cpp_features()` helpers. |
+| **Tune Semantic Function Prompting** | [lld_gen/llm_client.py](file:///c:/Users/pavan/Desktop/cxl/sfr_gen/lld_gen/llm_client.py) | Adjust `_LLD_NEW_FN_SYSTEM` system instruction prompt for semantic generation. |

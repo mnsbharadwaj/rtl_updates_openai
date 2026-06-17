@@ -27,7 +27,9 @@ STANDARD_TYPEDEFS = {
     "uint8", "uint16", "uint32", "uint64",
     "u8", "u16", "u32", "u64",
     "s8", "s16", "s32", "s64",
-    "int8", "int16", "int32", "int64"
+    "int8", "int16", "int32", "int64",
+    "REG_UINT8", "REG_UINT16", "REG_UINT32", "REG_UINT64",
+    "REG_INT8", "REG_INT16", "REG_INT32", "REG_INT64"
 }
 
 
@@ -235,6 +237,87 @@ def strip_balanced_keyword(text: str, keyword: str) -> str:
     return "".join(out)
 
 
+def strip_extern_c(text: str) -> str:
+    """
+    Finds occurrences of extern "C" { or extern "c" { and their matching closing braces,
+    replacing them with spaces of the same length to preserve coordinates.
+    """
+    out = list(text)
+    n = len(text)
+    
+    # Match extern "C" { or extern "c" {
+    pattern = re.compile(r'\bextern\s+"[Cc]"\s*\{')
+    for m in pattern.finditer(text):
+        start = m.start()
+        end = m.end()
+        
+        # Find the matching closing brace using a stack-based scan starting from end
+        depth = 1
+        i = end
+        in_str = False
+        in_char = False
+        in_line_comment = False
+        in_block_comment = False
+        prev = ""
+        matching_idx = -1
+        
+        while i < n:
+            ch = text[i]
+            if in_line_comment:
+                if ch == '\n' or ch == '\r':
+                    in_line_comment = False
+            elif in_block_comment:
+                if ch == '/' and prev == '*':
+                    in_block_comment = False
+            elif in_str:
+                if ch == '"' and prev != '\\':
+                    in_str = False
+            elif in_char:
+                if ch == "'" and prev != '\\':
+                    in_char = False
+            elif ch == '/' and i + 1 < n and text[i+1] == '/':
+                in_line_comment = True
+                i += 1
+            elif ch == '/' and i + 1 < n and text[i+1] == '*':
+                in_block_comment = True
+                i += 1
+            elif ch == '"':
+                in_str = True
+            elif ch == "'":
+                in_char = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    matching_idx = i
+                    break
+            prev = ch
+            i += 1
+            
+        if matching_idx != -1:
+            for k in range(start, end):
+                out[k] = ' '
+            out[matching_idx] = ' '
+            
+    return "".join(out)
+
+
+def strip_cpp_features(text: str) -> str:
+    """
+    Strips C++ specifiers (public:, private:, protected:) and member initializers
+    (e.g., = {0x...} or = 0) from the parsed code representation.
+    """
+    # Replace public:, private:, protected: with spaces
+    text = re.sub(r'\b(public|private|protected)\s*:', lambda m: " " * len(m.group(0)), text)
+    
+    # Replace struct member initializers (= {0} or = 0x123 or = {0x123} or = 0) with spaces.
+    # Safe to match only brace-enclosed constant initializers or hex/decimal numeric literals with optional U/L suffixes.
+    text = re.sub(r'=\s*(?:\{[^;]*\}|0[xX][0-9a-fA-F]+[uUlL]*|\d+[uUlL]*)', lambda m: " " * len(m.group(0)), text)
+    
+    return text
+
+
 def refactor_file(
     file_path: Path,
     changes: List[ChangeRecord],
@@ -274,6 +357,10 @@ def refactor_file(
 
     # Strip comments to prevent parse errors in pycparser while keeping line numbers
     code_for_parser = remove_comments_keep_spacing(cleaned_code)
+
+    # Strip extern "C" blocks and C++ features/initializers for parsing in memory
+    code_for_parser = strip_extern_c(code_for_parser)
+    code_for_parser = strip_cpp_features(code_for_parser)
 
     # Strip compiler-specific attributes and keywords to prevent parse errors in pycparser
     # while preserving line/column coordinates exactly

@@ -491,4 +491,66 @@ void core_noop(void) {
         assert f5 not in patched_sys
 
 
+def test_ast_cpp_header_parsing():
+    """Verify that C++ headers containing extern C, public, and struct initializers parse and refactor successfully."""
+    cpp_code = """#pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#pragma pack(push, 1)
+struct RegCMD
+{
+public:
+    union {
+        REG_UINT32 rIntCmdP0={0x0000000};
+        struct {
+            REG_UINT32 pci_error;
+            REG_UINT32 rsvd;
+        } rIntCmdP0;
+    };
+    REG_UINT32 rsvd[4] ={0x000000};
+};
+
+static inline void cmd_test(struct lld_pmu *lld) {
+    lld->pSFR->stPMU_CON.stNative.DMA_EN = 1;
+}
+
+#ifdef __cplusplus
+}
+#endif
+"""
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = Path(tmpdir) / "cpp_header.h"
+        file_path.write_text(cpp_code, encoding="utf-8")
+        
+        change = ChangeRecord(
+            change_type = ChangeType.REG_RENAMED,
+            reg_name    = "PMU_CON",
+            field_name  = None,
+            old_reg     = RegisterIR("PMU_CON", 0, {}),
+            new_reg     = RegisterIR("PMU_CTRL", 0, {}),
+            needs_llm   = False,
+            details     = []
+        )
+        
+        # Refactor the C++ file
+        applied = refactor_file(file_path, [change], {"struct lld_pmu"})
+        
+        # Verify renaming was successful in C++ context
+        assert len(applied) == 1
+        assert applied[0] == (21, "stPMU_CON", "stPMU_CTRL")
+        
+        updated_text = file_path.read_text(encoding="utf-8")
+        assert "stPMU_CTRL" in updated_text
+        assert "stPMU_CON" not in updated_text
+        
+        # Verify C++ specific constructs were fully preserved in output
+        assert 'extern "C" {' in updated_text
+        assert 'public:' in updated_text
+        assert 'rIntCmdP0={0x0000000};' in updated_text
+        assert 'rsvd[4] ={0x000000};' in updated_text
+
+
 

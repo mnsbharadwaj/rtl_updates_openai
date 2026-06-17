@@ -181,6 +181,7 @@ field that was added in a new SFR revision. There are NO existing functions to p
 
 RULES (follow exactly -- do NOT deviate):
 - Use the EXACT function names given in the user prompt section 'Exact function names'.
+- In addition, if the field description implies a specific semantic action (e.g. enabling, disabling, triggering, resetting), also generate ONE custom semantic action function named `lld_<ip>_<reg>_<field>_<verb>` (e.g., `lld_pmu_ctrl_dma_en_enable`, `lld_pmu_status_done_trigger`, etc.) using the same struct parameter type and C bitfield access path.
 - Use the EXACT struct parameter type given in the user prompt.
 - Use the EXACT bitfield access path given in the user prompt.
 - Getter body:  return (<type>)(<bitfield_path>);

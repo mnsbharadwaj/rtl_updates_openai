@@ -728,3 +728,70 @@ class TestTemplateGeneration:
         import json
         parsed = json.loads(json_str)
         assert len(parsed) == 12
+
+
+def test_field_added_semantic_generation():
+    """Verify that a FIELD_ADDED change with a description calls generate_new_lld_function on the LLM client."""
+    from unittest.mock import MagicMock
+    from lld_gen.lld_patcher import LLDPatcher
+    from lld_gen.sfr_diff_analyzer import ChangeRecord, ChangeType, FieldIR, RegisterIR
+    
+    # Mock LLM client
+    mock_llm = MagicMock()
+    mock_llm.available = True
+    mock_llm.generate_new_lld_function.return_value = (
+        "/** @brief Enable DMA channel. */\n"
+        "static inline void lld_dma_ctrl_en_enable(struct lld_dma *lld) {\n"
+        "    lld->pSFR->stCTRL.stNative.EN = 1U;\n"
+        "}"
+    )
+    
+    patcher = LLDPatcher(ip="DMA", llm_client=mock_llm, no_llm=False)
+    
+    # Define ChangeRecord
+    new_f = FieldIR(
+        name="EN", reg_name="CTRL", mask=1, shift=0, msb=0, lsb=0,
+        access="RW", reset=0, desc="1: enable, 0: disable", ip="DMA"
+    )
+    new_reg = RegisterIR("CTRL", 0, {"EN": new_f})
+    
+    cr = ChangeRecord(
+        change_type = ChangeType.FIELD_ADDED,
+        reg_name    = "CTRL",
+        field_name  = "EN",
+        old_field   = None,
+        new_field   = new_f,
+        old_reg     = None,
+        new_reg     = new_reg,
+        needs_llm   = True,
+        details     = []
+    )
+    
+    initial_block = (
+        "/* ============================================================\n"
+        " * REGISTER: CTRL\n"
+        " * SRC_SHA: 1234abcd\n"
+        " * ============================================================ */"
+    )
+    
+    # Call _apply
+    patched_block = patcher._apply(initial_block, "1234abcd", cr)
+    
+    # Assert generate_new_lld_function was called with correct arguments
+    mock_llm.generate_new_lld_function.assert_called_once_with(
+        ip="DMA",
+        reg_name="CTRL",
+        field_name="EN",
+        access="RW",
+        desc="1: enable, 0: disable",
+        width=1,
+        msb=0,
+        lsb=0,
+        reset=0,
+        struct_reg="stCTRL",
+        bitfield_path="lld->pSFR->stCTRL.stNative.EN"
+    )
+    
+    # Assert custom functions are present in the resulting block
+    assert "lld_dma_ctrl_en_enable" in patched_block
+    assert "stNative.EN = 1U;" in patched_block

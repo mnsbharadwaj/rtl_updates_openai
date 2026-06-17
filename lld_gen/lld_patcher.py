@@ -998,11 +998,36 @@ class LLDPatcher:
             new_reg = cr.new_reg
             if new_f is None or new_reg is None:
                 return block
-            new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
-            self._test_stubs.extend(self._make_test(cr))
-            block = block.rstrip() + "\n\n" + new_fns + "\n"
+
+            generated_by_llm = False
+            new_fns = ""
             if cr.needs_llm and not self._no_llm and self._llm is not None:
-                block = self._llm_body_only(block, cr)
+                st_reg = f"st{cr.reg_name}"
+                bitfield_path = f"lld->pSFR->{st_reg}.stNative.{new_f.name}"
+                try:
+                    new_fns = self._llm.generate_new_lld_function(
+                        ip=self.ip,
+                        reg_name=cr.reg_name,
+                        field_name=new_f.name,
+                        access=new_f.access,
+                        desc=new_f.desc,
+                        width=new_f.width,
+                        msb=new_f.msb,
+                        lsb=new_f.lsb,
+                        reset=new_f.reset,
+                        struct_reg=st_reg,
+                        bitfield_path=bitfield_path,
+                    )
+                    if new_fns and new_fns.strip():
+                        generated_by_llm = True
+                except Exception as exc:
+                    logger.error("[LLM-ERROR] Failed to generate new function: %s", exc)
+
+            if not generated_by_llm:
+                new_fns = generate_field_functions(self.ip, cr.reg_name, new_f, new_reg.offset)
+
+            self._test_stubs.extend(self._make_test(cr))
+            block = block.rstrip() + "\n\n" + new_fns.strip() + "\n"
             return block
 
         if ct == ChangeType.FIELD_SPLIT:
